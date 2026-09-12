@@ -190,11 +190,16 @@ async function handleAction(action, params = {}) {
       const injectionResults = await chrome.scripting.executeScript({
         target: { tabId },
         func: () => {
+          const links = Array.from(document.querySelectorAll('a[href]'))
+            .map(a => ({ text: a.innerText.trim(), href: a.href }))
+            .filter(l => l.text.length > 0)
+            .slice(0, 100);
+
           return {
             title: document.title,
             url: window.location.href,
             innerText: document.body ? document.body.innerText.slice(0, 50000) : '',
-            htmlSnippet: document.body ? document.body.innerHTML.slice(0, 50000) : ''
+            links
           };
         }
       });
@@ -211,7 +216,7 @@ async function handleAction(action, params = {}) {
 
       const injectionResults = await chrome.scripting.executeScript({
         target: { tabId },
-        args: [params.selector, params.text],
+        args: [params.selector || null, params.text || null],
         func: (selector, text) => {
           let el = null;
           if (selector) {
@@ -244,7 +249,7 @@ async function handleAction(action, params = {}) {
 
       const injectionResults = await chrome.scripting.executeScript({
         target: { tabId },
-        args: [params.selector, params.text, params.pressEnter],
+        args: [params.selector || null, params.text || '', !!params.pressEnter],
         func: (selector, text, pressEnter) => {
           const el = selector ? document.querySelector(selector) : document.activeElement;
           if (!el) return { success: false, error: 'Target input element not found' };
