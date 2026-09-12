@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Antigravity Browser Operator</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="card">
+    <div class="header">
+      <div class="logo">
+        <span class="logo-icon">⚡</span>
+        <div>
+          <h3>Antigravity</h3>
+          <p class="subtitle">Browser Operator</p>
+        </div>
+      </div>
+      <div id="statusBadge" class="badge disconnected">
+        <span class="dot"></span>
+        <span id="statusText">Disconnected</span>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="info-section">
+      <div class="info-row">
+        <span class="label">Bridge Port:</span>
+        <span class="val">ws://127.0.0.1:8765</span>
+      </div>
+      <div class="info-row">
+        <span class="label">Status:</span>
+        <span id="agentStatus" class="val">Waiting for Agent...</span>
+      </div>
+      <div class="info-row">
+        <span class="label">Active Tab:</span>
+        <span id="activeTabTitle" class="val truncate">Loading...</span>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="reconnectBtn" class="btn primary">Reconnect</button>
+    </div>
+
+    <div class="footer">
+      <span>Manus-grade CDP Browser Bridge</span>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
