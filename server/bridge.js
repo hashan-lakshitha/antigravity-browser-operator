@@ -2,9 +2,16 @@
 const { WebSocketServer } = require('ws');
 
 const WS_PORT = 8765;
-let extensionWs = null;
+const extensionClients = new Set();
 const mcpClients = new Set();
 const pendingRequests = new Map();
+
+function getActiveExtension() {
+  for (const ws of extensionClients) {
+    if (ws.readyState === 1) return ws;
+  }
+  return null;
+}
 
 const wss = new WebSocketServer({ port: WS_PORT, host: '127.0.0.1' });
 
@@ -19,10 +26,11 @@ wss.on('connection', (ws, req) => {
     ws.on('message', (data) => {
       try {
         const msg = JSON.parse(data.toString());
+        const activeExt = getActiveExtension();
         // Forward action to Chrome Extension
-        if (extensionWs && extensionWs.readyState === 1) {
+        if (activeExt) {
           pendingRequests.set(msg.id, ws);
-          extensionWs.send(JSON.stringify(msg));
+          activeExt.send(JSON.stringify(msg));
         } else {
           ws.send(JSON.stringify({
             id: msg.id,
@@ -44,7 +52,7 @@ wss.on('connection', (ws, req) => {
 
   // Otherwise, it's the Chrome Extension connecting!
   console.log('[Bridge Daemon] Chrome Extension connected');
-  extensionWs = ws;
+  extensionClients.add(ws);
 
   ws.on('message', (data) => {
     try {
@@ -66,21 +74,24 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     console.log('[Bridge Daemon] Chrome Extension disconnected');
-    if (extensionWs === ws) extensionWs = null;
+    extensionClients.delete(ws);
   });
 
   ws.on('error', (err) => {
     console.error('[Bridge Daemon] Extension socket error:', err.message);
+    extensionClients.delete(ws);
   });
 });
 
 // Periodic heartbeat to keep Chrome Extension service worker awake
 setInterval(() => {
-  if (extensionWs && extensionWs.readyState === 1) {
-    try {
-      extensionWs.send(JSON.stringify({ action: 'heartbeat' }));
-    } catch (e) {}
+  for (const ws of extensionClients) {
+    if (ws.readyState === 1) {
+      try {
+        ws.send(JSON.stringify({ action: 'heartbeat' }));
+      } catch (e) {}
+    }
   }
-}, 15000);
+}, 10000);
 
 console.log(`[Bridge Daemon] WebSocket running on ws://127.0.0.1:${WS_PORT}`);
