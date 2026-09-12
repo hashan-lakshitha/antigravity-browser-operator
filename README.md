@@ -12,12 +12,13 @@ Built with **Manifest V3 Chrome Extension** (`chrome.tabs`, `chrome.scripting`, 
 graph LR
   A["Antigravity AI Agent"] -->|MCP stdio| B["Local MCP Server (Node.js)"]
   B <-->|WebSocket ws://127.0.0.1:8765| C["Chrome Extension (Manifest V3)"]
-  C <-->|chrome.tabs & scripting API| D["Your Live Chrome (LinkedIn, GitHub, Gmail)"]
+  C <-->|chrome.tabs & scripting API| D["Your Live Chrome (Any Website / Web App)"]
 ```
 
 Unlike traditional debugging flags (`--remote-debugging-port`), this architecture works seamlessly inside your existing Chrome instance with:
 - ✅ **No Chrome restarts required**
-- ✅ **All active logins preserved** (LinkedIn, GitHub, Gmail, AWS, Cloudflare)
+- ✅ **Works across ANY website & web application** (Gmail, LinkedIn, GitHub, AWS, ChatGPT, etc.)
+- ✅ **All active logins & sessions preserved**
 - ✅ **Full session cookies & 2FA intact**
 - ✅ **Instant tab switching, clicking, typing, scrolling, and DOM extraction**
 
