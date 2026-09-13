@@ -6,8 +6,14 @@ const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
 const { CallToolRequestSchema, ListToolsRequestSchema } = require('@modelcontextprotocol/sdk/types.js');
 
+const { getOrCreateToken } = require('./auth.js');
+
 const WS_PORT = 8765;
-const BRIDGE_URL = `ws://127.0.0.1:${WS_PORT}/mcp`;
+function getBridgeUrl() {
+  const token = getOrCreateToken();
+  return `ws://127.0.0.1:${WS_PORT}/mcp?token=${encodeURIComponent(token)}`;
+}
+
 let bridgeWs = null;
 let messageId = 1;
 const pendingRequests = new Map();
@@ -31,16 +37,24 @@ function ensureBridgeRunning() {
 // Connect to bridge daemon
 function connectToBridge(retry = true) {
   return new Promise((resolve) => {
-    bridgeWs = new WebSocket(BRIDGE_URL);
+    const bridgeUrl = getBridgeUrl();
+    bridgeWs = new WebSocket(bridgeUrl);
 
     bridgeWs.on('open', () => {
-      console.error('[MCP Server] Connected to Bridge Daemon');
+      console.error('[MCP Server] Connected and Authenticated to Bridge Daemon');
       resolve(true);
     });
 
     bridgeWs.on('message', (data) => {
       try {
         const response = JSON.parse(data.toString());
+        if (response.action === 'auth_success' || response.action === 'auth_error') {
+          if (response.action === 'auth_error') {
+            console.error('[MCP Server] Authentication failed with Bridge Daemon:', response.error);
+          }
+          return;
+        }
+
         const { id, result, error } = response;
         if (pendingRequests.has(id)) {
           const { resolve: reqResolve, reject: reqReject } = pendingRequests.get(id);
@@ -113,7 +127,7 @@ function sendAction(action, params = {}, timeoutMs = 25000) {
 const server = new Server(
   {
     name: 'antigravity-browser-operator',
-    version: '1.0.1',
+    version: '1.1.0',
   },
   {
     capabilities: {

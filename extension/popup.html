@@ -10,7 +10,7 @@
   <div class="card">
     <div class="header">
       <div class="logo">
-        <span class="logo-icon">⚡</span>
+        <img src="icons/icon48.png" alt="Antigravity" class="logo-img">
         <div>
           <h3>Antigravity</h3>
           <p class="subtitle">Browser Operator</p>
@@ -26,12 +26,12 @@
 
     <div class="info-section">
       <div class="info-row">
-        <span class="label">Bridge Port:</span>
-        <span class="val">ws://127.0.0.1:8765</span>
+        <span class="label">Bridge:</span>
+        <span class="val">127.0.0.1:8765</span>
       </div>
       <div class="info-row">
         <span class="label">Status:</span>
-        <span id="agentStatus" class="val">Waiting for Agent...</span>
+        <span id="agentStatus" class="val">Waiting for Bridge...</span>
       </div>
       <div class="info-row">
         <span class="label">Active Tab:</span>
@@ -39,12 +39,28 @@
       </div>
     </div>
 
-    <div class="actions">
-      <button id="reconnectBtn" class="btn primary">Reconnect</button>
+    <!-- Security & Authentication -->
+    <div class="security-section">
+      <div class="section-title-row">
+        <span class="section-title">🔐 Security Token</span>
+        <span id="authStatusBadge" class="auth-pill unverified">Not Configured</span>
+      </div>
+      <div class="token-input-group">
+        <input type="password" id="tokenInput" placeholder="Paste token here..." autocomplete="off" spellcheck="false">
+        <button id="toggleTokenBtn" class="icon-btn" title="Show/Hide Token" type="button">👁️</button>
+      </div>
+      <p class="token-hint" id="tokenHint">
+        From: <code>~/.antigravity-browser-operator/token</code>
+      </p>
+      <div class="token-actions">
+        <button id="saveTokenBtn" class="btn secondary">Save Token</button>
+        <button id="reconnectBtn" class="btn primary">Reconnect</button>
+      </div>
     </div>
 
     <div class="footer">
-      <span>Manus-grade CDP Browser Bridge</span>
+      <button id="reloadExtBtn" class="link-btn" title="Restart Extension Service Worker">🔄 Reload Extension</button>
+      <div class="footer-caption">Protected by Cryptographic Token & CSWSH Filter</div>
     </div>
   </div>
 

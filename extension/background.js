@@ -2,37 +2,111 @@
 const WS_URL = 'ws://127.0.0.1:8765';
 let socket = null;
 let isConnected = false;
+let authRequired = false;
+let authError = null;
 let reconnectTimer = null;
+let isConnecting = false;
 
 console.log('[Antigravity] Background service worker initialized');
 
+// Storage helper functions for security token
+async function getStoredToken() {
+  try {
+    const data = await chrome.storage.local.get(['antigravity_token']);
+    return data.antigravity_token ? data.antigravity_token.trim() : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function setStoredToken(token) {
+  try {
+    if (token && token.trim()) {
+      await chrome.storage.local.set({ antigravity_token: token.trim() });
+    } else {
+      await chrome.storage.local.remove('antigravity_token');
+    }
+    authRequired = false;
+    authError = null;
+    if (socket) {
+      try {
+        const oldSocket = socket;
+        socket = null;
+        oldSocket.close();
+      } catch (e) {}
+    }
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    connectBridge();
+  } catch (e) {
+    console.error('[Antigravity] Failed to save token:', e);
+  }
+}
+
 // Connect to local Antigravity MCP Bridge
-function connectBridge() {
+async function connectBridge() {
+  if (isConnecting) return;
   if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
     return;
   }
 
+  isConnecting = true;
   try {
-    socket = new WebSocket(WS_URL);
+    const token = await getStoredToken();
+    if (!token) {
+      console.warn('[Antigravity] No auth token found. Token configuration required.');
+      isConnected = false;
+      authRequired = true;
+      authError = 'Security token required. Please enter the token in the extension popup.';
+      notifyPopup({ type: 'STATUS_CHANGE', connected: false, authRequired, authError });
+      return;
+    }
 
-    socket.onopen = () => {
+    if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+
+    const bridgeUrl = `${WS_URL}?token=${encodeURIComponent(token)}`;
+    const currentWs = new WebSocket(bridgeUrl);
+    socket = currentWs;
+
+    currentWs.onopen = () => {
       console.log('[Antigravity] Connected to Local MCP Bridge at', WS_URL);
-      isConnected = true;
-      notifyPopup({ type: 'STATUS_CHANGE', connected: true });
-      if (reconnectTimer) {
-        clearInterval(reconnectTimer);
-        reconnectTimer = null;
-      }
     };
 
-    socket.onmessage = async (event) => {
+    currentWs.onmessage = async (event) => {
       try {
         const message = JSON.parse(event.data);
 
+        // Handle authentication events
+        if (message.action === 'auth_success') {
+          console.log('[Antigravity] Authenticated with Bridge');
+          isConnected = true;
+          authRequired = false;
+          authError = null;
+          notifyPopup({ type: 'STATUS_CHANGE', connected: true, authRequired: false });
+          if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+          }
+          return;
+        }
+
+        if (message.action === 'auth_error') {
+          console.warn('[Antigravity] Authentication failed:', message.error);
+          isConnected = false;
+          authRequired = true;
+          authError = message.error;
+          notifyPopup({ type: 'STATUS_CHANGE', connected: false, authRequired: true, authError });
+          return;
+        }
+
         // Handle heartbeat from server to keep service worker alive
         if (message.action === 'heartbeat') {
-          if (socket && socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ action: 'heartbeat_ack', time: Date.now() }));
+          if (currentWs && currentWs.readyState === WebSocket.OPEN) {
+            currentWs.send(JSON.stringify({ action: 'heartbeat_ack', time: Date.now() }));
           }
           return;
         }
@@ -50,46 +124,65 @@ function connectBridge() {
           error = err.message || String(err);
         }
 
-        if (socket && socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({ id, result, error }));
+        if (currentWs && currentWs.readyState === WebSocket.OPEN) {
+          currentWs.send(JSON.stringify({ id, result, error }));
         }
       } catch (e) {
         console.error('[Antigravity] Failed to process message:', e);
       }
     };
 
-    socket.onclose = () => {
-      isConnected = false;
-      notifyPopup({ type: 'STATUS_CHANGE', connected: false });
-      scheduleReconnect();
+    currentWs.onclose = (event) => {
+      if (socket === currentWs) {
+        socket = null;
+        isConnected = false;
+        if (event.code === 4001 || event.code === 4003) {
+          authRequired = true;
+          authError = 'Authentication failed. Please verify your security token.';
+        }
+        notifyPopup({ type: 'STATUS_CHANGE', connected: false, authRequired, authError });
+        scheduleReconnect();
+      }
     };
 
-    socket.onerror = () => {
-      isConnected = false;
+    currentWs.onerror = () => {
+      if (socket === currentWs) {
+        isConnected = false;
+      }
     };
   } catch (err) {
     scheduleReconnect();
+  } finally {
+    isConnecting = false;
   }
 }
 
 function scheduleReconnect() {
-  if (!reconnectTimer) {
-    reconnectTimer = setInterval(() => {
-      connectBridge();
-    }, 2500);
-  }
+  if (reconnectTimer) return;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connectBridge();
+  }, 2500);
 }
 
 // Keep service worker alive and reconnect on any browser activity
 chrome.alarms.create('antigravity_keepalive', { periodInMinutes: 0.2 });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === 'antigravity_keepalive') {
+  if (alarm.name === 'antigravity_keepalive' && (!socket || socket.readyState !== WebSocket.OPEN)) {
     connectBridge();
   }
 });
 
-chrome.tabs.onActivated.addListener(() => connectBridge());
-chrome.tabs.onUpdated.addListener(() => connectBridge());
+chrome.tabs.onActivated.addListener(() => {
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    connectBridge();
+  }
+});
+chrome.tabs.onUpdated.addListener(() => {
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    connectBridge();
+  }
+});
 
 // Notify popup UI if open
 function notifyPopup(msg) {
@@ -324,10 +417,30 @@ async function handleAction(action, params = {}) {
 // Listen for popup inquiries
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.type === 'GET_STATUS') {
-    sendResponse({ isConnected });
+    getStoredToken().then((token) => {
+      sendResponse({
+        isConnected,
+        authRequired,
+        authError,
+        hasToken: !!token
+      });
+    });
+    return true;
+  } else if (request.type === 'GET_TOKEN') {
+    getStoredToken().then((token) => {
+      sendResponse({ token });
+    });
+    return true;
+  } else if (request.type === 'SET_TOKEN') {
+    setStoredToken(request.token).then(() => {
+      sendResponse({ success: true });
+    });
+    return true;
   } else if (request.type === 'RECONNECT') {
-    connectBridge();
-    sendResponse({ status: 'reconnecting' });
+    connectBridge().then(() => {
+      sendResponse({ status: 'reconnecting' });
+    });
+    return true;
   }
   return true;
 });

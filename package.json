@@ -1,11 +1,12 @@
 {
   "name": "antigravity-browser-operator",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Connects your live Google Chrome browser directly to Antigravity AI Agent (and other MCP clients) without restarting Chrome, preserving all active logins and cookies.",
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
     "bridge": "node server/bridge.js",
+    "token": "node -e \"console.log(require('./server/auth.js').getOrCreateToken())\"",
     "test-client": "node test/test-client.js"
   },
   "repository": {

@@ -1,15 +1,19 @@
 // Test WebSocket client to simulate the Chrome Extension
 const WebSocket = require('ws');
+const { getOrCreateToken } = require('../server/auth.js');
 
-const ws = new WebSocket('ws://127.0.0.1:8765');
+const token = getOrCreateToken();
+const ws = new WebSocket(`ws://127.0.0.1:8765?token=${encodeURIComponent(token)}`);
 
 ws.on('open', () => {
-  console.log('Test Extension Connected to Bridge!');
+  console.log('Test Extension Connected and Authenticated to Bridge!');
 });
 
 ws.on('message', (data) => {
-  console.log('Received action from MCP Server:', data.toString());
   const msg = JSON.parse(data.toString());
+  if (msg.action === 'auth_success' || msg.action === 'heartbeat') return;
+
+  console.log('Received action from MCP Server:', data.toString());
   
   if (msg.action === 'list_tabs') {
     ws.send(JSON.stringify({
