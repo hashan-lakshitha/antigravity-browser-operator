@@ -1,6 +1,6 @@
 {
   "name": "antigravity-browser-operator",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Connects your live Google Chrome browser directly to Antigravity AI Agent (and other MCP clients) without restarting Chrome, preserving all active logins and cookies.",
   "main": "server/index.js",
   "scripts": {

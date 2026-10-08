@@ -250,6 +250,20 @@ async function handleAction(action, params = {}) {
       }
       if (!tabId) throw new Error('No active tab found');
 
+      // Clear beforeunload listeners to prevent blocking "Leave site?" prompts
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId },
+          func: () => {
+            window.onbeforeunload = null;
+            window.addEventListener('beforeunload', (e) => {
+              e.stopImmediatePropagation();
+              delete e['returnValue'];
+            }, true);
+          }
+        });
+      } catch (e) {}
+
       await chrome.tabs.update(tabId, { url: params.url });
 
       // Wait for tab to complete loading (up to 15s)
@@ -306,6 +320,42 @@ async function handleAction(action, params = {}) {
           } catch (dbgErr) {}
         }
         throw err;
+      }
+    }
+
+    case 'handle_dialog': {
+      let tabId = params.tabId ? parseInt(params.tabId, 10) : null;
+      if (!tabId) {
+        const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+        tabId = active?.id;
+      }
+      if (!tabId) throw new Error('No active tab found');
+
+      const accept = params.accept !== undefined ? Boolean(params.accept) : true;
+      const promptText = params.promptText || undefined;
+      let needDetach = false;
+
+      try {
+        try {
+          await chrome.debugger.attach({ tabId }, '1.3');
+          needDetach = true;
+        } catch (attachErr) {
+          if (!attachErr.message.includes('Already attached')) {
+            throw attachErr;
+          }
+        }
+
+        await chrome.debugger.sendCommand({ tabId }, 'Page.handleJavaScriptDialog', {
+          accept,
+          ...(promptText ? { promptText } : {})
+        });
+        return { success: true, tabId, handled: true, accept };
+      } catch (err) {
+        return { success: false, error: err.message };
+      } finally {
+        if (needDetach) {
+          try { await chrome.debugger.detach({ tabId }); } catch (e) {}
+        }
       }
     }
 

@@ -299,6 +299,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ['filePath'],
         },
       },
+      {
+        name: 'browser_handle_dialog',
+        description: 'Handles, accepts, or dismisses browser native JavaScript modal dialogs (alerts, confirms, prompts, and "Leave site?" beforeunload dialogs) using Chrome DevTools Protocol.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            tabId: { type: 'number', description: 'Target tab ID (optional, defaults to active tab).' },
+            accept: { type: 'boolean', description: 'Whether to accept (click Leave/OK/Yes) or dismiss (click Cancel/No). Defaults to true.' },
+            promptText: { type: 'string', description: 'Optional prompt text to enter into the dialog.' },
+          },
+        },
+      },
     ],
   };
 });
@@ -413,6 +425,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           selector: args.selector,
           ref: args.ref,
           tabId: args.tabId
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      }
+      case 'browser_handle_dialog': {
+        const result = await sendAction('handle_dialog', {
+          tabId: args.tabId,
+          accept: args.accept !== undefined ? args.accept : true,
+          promptText: args.promptText
         });
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       }
