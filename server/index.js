@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 const { spawn } = require('child_process');
 const path = require('path');
+const fs = require('fs');
 const WebSocket = require('ws');
 const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
@@ -194,12 +195,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'browser_click',
-        description: 'Clicks an element on the active or specified tab using a CSS selector or visible text.',
+        description: 'Clicks an element on the active or specified tab using an indexed ref, CSS selector, or visible text.',
         inputSchema: {
           type: 'object',
           properties: {
+            ref: { type: 'string', description: 'Indexed reference ID of the element (e.g. "1", "2") assigned by browser_get_dom.' },
             selector: { type: 'string', description: 'CSS selector of element to click.' },
             text: { type: 'string', description: 'Visible text inside element to click.' },
+            x: { type: 'number', description: 'X pixel coordinate to click.' },
+            y: { type: 'number', description: 'Y pixel coordinate to click.' },
             tabId: { type: 'number', description: 'Optional tab ID.' },
           },
         },
@@ -210,12 +214,40 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: {
           type: 'object',
           properties: {
+            ref: { type: 'string', description: 'Indexed reference ID of the input element (e.g. "1", "2") assigned by browser_get_dom.' },
             selector: { type: 'string', description: 'CSS selector of input element.' },
             text: { type: 'string', description: 'Text to type.' },
             pressEnter: { type: 'boolean', description: 'Whether to press Enter after typing.' },
             tabId: { type: 'number', description: 'Optional tab ID.' },
           },
           required: ['text'],
+        },
+      },
+      {
+        name: 'browser_select_option',
+        description: 'Selects an option from a <select> dropdown or listbox on the active or specified tab.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            ref: { type: 'string', description: 'Indexed reference ID of the select element.' },
+            selector: { type: 'string', description: 'CSS selector of the select element.' },
+            value: { type: 'string', description: 'Value of the option to select.' },
+            text: { type: 'string', description: 'Visible label text of the option to select.' },
+            tabId: { type: 'number', description: 'Optional tab ID.' },
+          },
+        },
+      },
+      {
+        name: 'browser_set_checked',
+        description: 'Sets the checked state of a checkbox, radio button, or switch toggle.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            ref: { type: 'string', description: 'Indexed reference ID of the checkbox/radio element.' },
+            selector: { type: 'string', description: 'CSS selector of the checkbox/radio element.' },
+            checked: { type: 'boolean', description: 'Desired checked state (true or false). Default is true.' },
+            tabId: { type: 'number', description: 'Optional tab ID.' },
+          },
         },
       },
       {
@@ -232,10 +264,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'browser_screenshot',
-        description: 'Captures a visible screenshot of the active or specified tab in Chrome as a data URL.',
+        description: 'Captures a visible screenshot of the active or specified tab in Chrome and saves it as a PNG image on disk.',
         inputSchema: {
           type: 'object',
-          properties: { tabId: { type: 'number', description: 'Optional tab ID.' } },
+          properties: {
+            savePath: { type: 'string', description: 'Optional file path to save the PNG image. If omitted, saves to project screenshots folder.' },
+            tabId: { type: 'number', description: 'Optional tab ID.' },
+          },
         },
       },
       {
@@ -248,6 +283,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             tabId: { type: 'number', description: 'Optional tab ID.' },
           },
           required: ['script'],
+        },
+      },
+      {
+        name: 'browser_upload_file',
+        description: 'Uploads a local file to a file input on the active or specified tab completely autonomously without opening OS file picker.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            filePath: { type: 'string', description: 'Absolute local file path to upload (e.g. D:\\facebook-ai-agent\\assets\\cover.jpg).' },
+            selector: { type: 'string', description: 'Optional CSS selector of the file input (defaults to input[type="file"]).' },
+            ref: { type: 'string', description: 'Optional indexed reference ID from browser_get_dom.' },
+            tabId: { type: 'number', description: 'Optional tab ID.' },
+          },
+          required: ['filePath'],
         },
       },
     ],
@@ -285,11 +334,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       }
       case 'browser_click': {
-        const result = await sendAction('click', { selector: args.selector, text: args.text, tabId: args.tabId });
+        const result = await sendAction('click', { selector: args.selector, text: args.text, ref: args.ref, tabId: args.tabId, x: args.x, y: args.y });
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
       }
       case 'browser_type': {
-        const result = await sendAction('type', { selector: args.selector, text: args.text, pressEnter: args.pressEnter, tabId: args.tabId });
+        const result = await sendAction('type', { selector: args.selector, text: args.text, pressEnter: args.pressEnter, ref: args.ref, tabId: args.tabId });
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      }
+      case 'browser_select_option': {
+        const result = await sendAction('select_option', { selector: args.selector, ref: args.ref, value: args.value, text: args.text, tabId: args.tabId });
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      }
+      case 'browser_set_checked': {
+        const result = await sendAction('set_checked', { selector: args.selector, ref: args.ref, checked: args.checked, tabId: args.tabId });
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
       }
       case 'browser_scroll': {
@@ -298,10 +355,65 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       case 'browser_screenshot': {
         const result = await sendAction('screenshot', { tabId: args.tabId });
-        return { content: [{ type: 'text', text: `Screenshot captured (length: ${result.dataUrl ? result.dataUrl.length : 0})` }] };
+        let savedPath = null;
+        if (result && result.dataUrl) {
+          try {
+            const base64Data = result.dataUrl.replace(/^data:image\/png;base64,/, '');
+            const buffer = Buffer.from(base64Data, 'base64');
+            const screenshotsDir = path.resolve(__dirname, '..', 'screenshots');
+            if (!fs.existsSync(screenshotsDir)) {
+              fs.mkdirSync(screenshotsDir, { recursive: true });
+            }
+            savedPath = args.savePath ? path.resolve(args.savePath) : path.join(screenshotsDir, `screenshot_${Date.now()}.png`);
+            const targetDir = path.dirname(savedPath);
+            if (!fs.existsSync(targetDir)) {
+              fs.mkdirSync(targetDir, { recursive: true });
+            }
+            fs.writeFileSync(savedPath, buffer);
+          } catch (fsErr) {
+            console.error('[MCP Server] Failed to save screenshot to disk:', fsErr.message);
+          }
+        }
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              success: !!(result && result.dataUrl),
+              savedPath: savedPath || undefined,
+              fileUrl: savedPath ? `file:///${savedPath.replace(/\\/g, '/')}` : undefined,
+              dataLength: result && result.dataUrl ? result.dataUrl.length : 0
+            }, null, 2)
+          }]
+        };
       }
       case 'browser_evaluate': {
         const result = await sendAction('evaluate', { script: args.script, tabId: args.tabId });
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      }
+      case 'browser_upload_file': {
+        const filePath = path.resolve(args.filePath);
+        if (!fs.existsSync(filePath)) {
+          throw new Error(`File not found: ${filePath}`);
+        }
+        const fileBuffer = fs.readFileSync(filePath);
+        const base64Data = fileBuffer.toString('base64');
+        const fileName = path.basename(filePath);
+        const ext = path.extname(filePath).toLowerCase();
+        let mimeType = 'application/octet-stream';
+        if (ext === '.jpg' || ext === '.jpeg') mimeType = 'image/jpeg';
+        else if (ext === '.png') mimeType = 'image/png';
+        else if (ext === '.mp4') mimeType = 'video/mp4';
+        else if (ext === '.webp') mimeType = 'image/webp';
+
+        const result = await sendAction('upload_file', {
+          filePath,
+          fileName,
+          mimeType,
+          base64Data,
+          selector: args.selector,
+          ref: args.ref,
+          tabId: args.tabId
+        });
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       }
       default:

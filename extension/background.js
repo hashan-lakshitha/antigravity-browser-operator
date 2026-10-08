@@ -217,7 +217,16 @@ async function handleAction(action, params = {}) {
       const tab = await chrome.tabs.get(tabId);
       await chrome.tabs.update(tabId, { active: true });
       if (tab && tab.windowId) {
-        await chrome.windows.update(tab.windowId, { focused: true });
+        try {
+          const win = await chrome.windows.get(tab.windowId);
+          const updateInfo = { focused: true };
+          if (win.state === 'minimized') {
+            updateInfo.state = 'normal';
+          }
+          await chrome.windows.update(tab.windowId, updateInfo);
+        } catch (e) {
+          await chrome.windows.update(tab.windowId, { focused: true });
+        }
       }
       return { success: true, tabId };
     }
@@ -264,12 +273,40 @@ async function handleAction(action, params = {}) {
 
     case 'screenshot': {
       let windowId = null;
+      let targetTabId = null;
       if (params.tabId) {
-        const tab = await chrome.tabs.get(parseInt(params.tabId, 10));
+        targetTabId = parseInt(params.tabId, 10);
+        const tab = await chrome.tabs.get(targetTabId);
         windowId = tab.windowId;
       }
-      const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: 'png' });
-      return { success: true, dataUrl };
+      if (windowId) {
+        try {
+          const win = await chrome.windows.get(windowId);
+          if (win.state === 'minimized') {
+            await chrome.windows.update(windowId, { state: 'normal', focused: true });
+            await new Promise(r => setTimeout(r, 400));
+          }
+        } catch (e) {}
+      }
+      try {
+        const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: 'png' });
+        return { success: true, dataUrl };
+      } catch (err) {
+        if (targetTabId) {
+          try {
+            await chrome.debugger.attach({ tabId: targetTabId }, '1.3');
+            try {
+              const res = await chrome.debugger.sendCommand({ tabId: targetTabId }, 'Page.captureScreenshot', { format: 'png' });
+              if (res && res.data) {
+                return { success: true, dataUrl: 'data:image/png;base64,' + res.data };
+              }
+            } finally {
+              try { await chrome.debugger.detach({ tabId: targetTabId }); } catch(e){}
+            }
+          } catch (dbgErr) {}
+        }
+        throw err;
+      }
     }
 
     case 'get_dom': {
@@ -288,11 +325,43 @@ async function handleAction(action, params = {}) {
             .filter(l => l.text.length > 0)
             .slice(0, 100);
 
+          // Tag and index visible interactive elements
+          const interactiveSelectors = 'button, a, input, select, textarea, [role="button"], [role="link"], [role="checkbox"], [role="switch"], [role="tab"], [role="menuitem"], label, summary';
+          const candidates = Array.from(document.querySelectorAll(interactiveSelectors));
+          
+          let refCounter = 1;
+          const elements = [];
+          for (const el of candidates) {
+            // Check visibility
+            const rect = el.getBoundingClientRect();
+            const isVisible = (rect.width > 0 || rect.height > 0) && window.getComputedStyle(el).visibility !== 'hidden' && window.getComputedStyle(el).display !== 'none';
+            if (!isVisible) continue;
+
+            const ref = String(refCounter++);
+            el.setAttribute('data-ag-ref', ref);
+
+            const text = (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('title') || '').trim().slice(0, 80);
+            elements.push({
+              ref,
+              tag: el.tagName.toLowerCase(),
+              type: el.type || undefined,
+              role: el.getAttribute('role') || undefined,
+              text: text || undefined,
+              name: el.name || undefined,
+              placeholder: el.placeholder || undefined,
+              href: el.href ? el.href.slice(0, 120) : undefined,
+              checked: typeof el.checked === 'boolean' ? el.checked : (el.getAttribute('aria-checked') === 'true' ? true : (el.getAttribute('aria-checked') === 'false' ? false : undefined))
+            });
+
+            if (elements.length >= 150) break;
+          }
+
           return {
             title: document.title,
             url: window.location.href,
             innerText: document.body ? document.body.innerText.slice(0, 50000) : '',
-            links
+            links,
+            elements
           };
         }
       });
@@ -309,27 +378,105 @@ async function handleAction(action, params = {}) {
 
       const injectionResults = await chrome.scripting.executeScript({
         target: { tabId },
-        args: [params.selector || null, params.text || null],
-        func: (selector, text) => {
+        args: [params.selector || null, params.text || null, params.ref || null, params.x !== undefined ? params.x : null, params.y !== undefined ? params.y : null],
+        func: (selector, text, ref, x, y) => {
           let el = null;
-          if (selector) {
+          if (x !== null && y !== null) {
+            el = document.elementFromPoint(x, y);
+            if (!el) {
+              return { success: true, tagName: 'COORDINATE', text: '', x, y };
+            }
+          }
+          if (!el && ref) {
+            el = document.querySelector(`[data-ag-ref="${ref}"]`);
+          }
+          if (!el && selector) {
             el = document.querySelector(selector);
           }
           if (!el && text) {
-            const xpath = `//*[contains(text(), '${text}')]`;
-            const result = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
-            el = result.singleNodeValue;
+            const lowerText = text.toLowerCase().trim();
+            // 1. Check interactive elements for exact match
+            const interactiveSelectors = 'button, a, input, select, textarea, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="checkbox"], [role="switch"], [role="option"], [onclick], label, summary, li';
+            const candidates = Array.from(document.querySelectorAll(interactiveSelectors));
+            el = candidates.find(c => {
+              const t = (c.innerText || c.getAttribute('aria-label') || c.getAttribute('title') || '').toLowerCase().trim();
+              return t === lowerText;
+            });
+
+            // 2. Check leaf elements for exact match
+            if (!el) {
+              const leaves = Array.from(document.querySelectorAll('body *:not(script):not(style):not(noscript):not(svg):not(path)'))
+                .filter(c => c.children.length === 0);
+              el = leaves.find(c => (c.innerText || '').toLowerCase().trim() === lowerText);
+            }
+
+            // 3. Check candidates for substring match, innermost/shortest text first
+            if (!el) {
+              const matches = candidates.filter(c => {
+                const t = (c.innerText || c.value || c.getAttribute('aria-label') || c.getAttribute('title') || '').toLowerCase();
+                return t.includes(lowerText);
+              });
+              matches.sort((a, b) => (a.innerText || a.value || '').length - (b.innerText || b.value || '').length);
+              el = matches[0];
+            }
+
+            // 4. Check any visible element, innermost/shortest text first
+            if (!el) {
+              const nonCodeElements = Array.from(document.querySelectorAll('body *:not(script):not(style):not(noscript):not(svg):not(path)'))
+                .filter(c => (c.innerText || '').toLowerCase().includes(lowerText));
+              nonCodeElements.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+              el = nonCodeElements[0];
+            }
           }
           if (!el) {
             return { success: false, error: 'Element not found' };
           }
-          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          el.scrollIntoView({ block: 'center' });
           el.focus();
+          const mouseOpts = { bubbles: true, cancelable: true, view: window };
+          try { el.dispatchEvent(new PointerEvent('pointerdown', mouseOpts)); } catch (e) {}
+          try { el.dispatchEvent(new MouseEvent('mousedown', mouseOpts)); } catch (e) {}
+          try { el.dispatchEvent(new PointerEvent('pointerup', mouseOpts)); } catch (e) {}
+          try { el.dispatchEvent(new MouseEvent('mouseup', mouseOpts)); } catch (e) {}
           el.click();
-          return { success: true, tagName: el.tagName, text: el.innerText };
+
+          const rect = el.getBoundingClientRect();
+          return {
+            success: true,
+            tagName: el.tagName,
+            ref: el.getAttribute('data-ag-ref') || undefined,
+            text: (el.innerText || el.value || '').trim().slice(0, 100),
+            x: x !== null ? x : Math.round(rect.left + rect.width / 2),
+            y: y !== null ? y : Math.round(rect.top + rect.height / 2)
+          };
         }
       });
-      return injectionResults[0]?.result || {};
+
+      const res = injectionResults[0]?.result || {};
+      if (res.x !== undefined && res.y !== undefined && res.x > 0 && res.y > 0) {
+        try {
+          await chrome.debugger.attach({ tabId }, '1.3');
+          try {
+            await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+              type: 'mousePressed',
+              x: res.x,
+              y: res.y,
+              button: 'left',
+              clickCount: 1
+            });
+            await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+              type: 'mouseReleased',
+              x: res.x,
+              y: res.y,
+              button: 'left',
+              clickCount: 1
+            });
+          } finally {
+            try { await chrome.debugger.detach({ tabId }); } catch (e) {}
+          }
+        } catch (dbgErr) {}
+      }
+      return res;
     }
 
     case 'type': {
@@ -342,9 +489,18 @@ async function handleAction(action, params = {}) {
 
       const injectionResults = await chrome.scripting.executeScript({
         target: { tabId },
-        args: [params.selector || null, params.text || '', !!params.pressEnter],
-        func: (selector, text, pressEnter) => {
-          const el = selector ? document.querySelector(selector) : document.activeElement;
+        args: [params.selector || null, params.text || '', !!params.pressEnter, params.ref || null],
+        func: (selector, text, pressEnter, ref) => {
+          let el = null;
+          if (ref) {
+            el = document.querySelector(`[data-ag-ref="${ref}"]`);
+          }
+          if (!el && selector) {
+            el = document.querySelector(selector);
+          }
+          if (!el) {
+            el = document.activeElement;
+          }
           if (!el) return { success: false, error: 'Target input element not found' };
 
           el.focus();
@@ -360,7 +516,171 @@ async function handleAction(action, params = {}) {
             el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
             el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
           }
-          return { success: true };
+          return { success: true, ref: el.getAttribute('data-ag-ref') || undefined };
+        }
+      });
+      return injectionResults[0]?.result || {};
+    }
+
+    case 'select_option': {
+      let tabId = params.tabId ? parseInt(params.tabId, 10) : null;
+      if (!tabId) {
+        const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+        tabId = active?.id;
+      }
+      if (!tabId) throw new Error('No active tab found');
+
+      const injectionResults = await chrome.scripting.executeScript({
+        target: { tabId },
+        args: [params.selector || null, params.ref || null, params.value || null, params.text || null],
+        func: (selector, ref, value, text) => {
+          let el = null;
+          if (ref) el = document.querySelector(`[data-ag-ref="${ref}"]`);
+          if (!el && selector) el = document.querySelector(selector);
+          if (!el) return { success: false, error: 'Select element not found' };
+
+          if (el.tagName !== 'SELECT') {
+            const option = el.querySelector(`[data-value="${value}"], [value="${value}"]`) ||
+              Array.from(el.querySelectorAll('*')).find(o => (o.innerText || '').trim() === text);
+            if (option) {
+              option.click();
+              return { success: true, selectedText: option.innerText };
+            }
+            return { success: false, error: 'Element is not a <select> and matching option was not found' };
+          }
+
+          let selected = false;
+          for (let i = 0; i < el.options.length; i++) {
+            const opt = el.options[i];
+            if ((value && opt.value === value) || (text && opt.text.trim().toLowerCase() === text.trim().toLowerCase())) {
+              el.selectedIndex = i;
+              selected = true;
+              break;
+            }
+          }
+          if (!selected && value) {
+            el.value = value;
+            selected = true;
+          }
+          if (!selected) {
+            return { success: false, error: `Option with value="${value}" or text="${text}" not found` };
+          }
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          return { success: true, selectedIndex: el.selectedIndex, value: el.value, text: el.options[el.selectedIndex]?.text };
+        }
+      });
+      return injectionResults[0]?.result || {};
+    }
+
+    case 'set_checked': {
+      let tabId = params.tabId ? parseInt(params.tabId, 10) : null;
+      if (!tabId) {
+        const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+        tabId = active?.id;
+      }
+      if (!tabId) throw new Error('No active tab found');
+
+      const injectionResults = await chrome.scripting.executeScript({
+        target: { tabId },
+        args: [params.selector || null, params.ref || null, params.checked !== false],
+        func: (selector, ref, checked) => {
+          let el = null;
+          if (ref) el = document.querySelector(`[data-ag-ref="${ref}"]`);
+          if (!el && selector) el = document.querySelector(selector);
+          if (!el) return { success: false, error: 'Target element not found' };
+
+          if ('checked' in el) {
+            if (el.checked !== checked) {
+              el.checked = checked;
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+              el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+            }
+          } else if (el.getAttribute('role') === 'checkbox' || el.getAttribute('role') === 'switch') {
+            el.setAttribute('aria-checked', String(checked));
+            el.click();
+          } else {
+            el.click();
+          }
+          return { success: true, checked: el.checked ?? el.getAttribute('aria-checked') };
+        }
+      });
+      return injectionResults[0]?.result || {};
+    }
+
+    case 'upload_file': {
+      let tabId = params.tabId ? parseInt(params.tabId, 10) : null;
+      if (!tabId) {
+        const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+        tabId = active?.id;
+      }
+      if (!tabId) throw new Error('No active tab found');
+
+      // 1. Try Chrome DevTools Protocol DOM.setFileInputFiles first
+      if (params.filePath) {
+        try {
+          await chrome.debugger.attach({ tabId }, '1.3');
+          try {
+            const doc = await chrome.debugger.sendCommand({ tabId }, 'DOM.getDocument', {});
+            const selector = params.selector || 'input[type="file"]';
+            const node = await chrome.debugger.sendCommand({ tabId }, 'DOM.querySelector', {
+              nodeId: doc.root.nodeId,
+              selector
+            });
+            if (node && node.nodeId) {
+              await chrome.debugger.sendCommand({ tabId }, 'DOM.setFileInputFiles', {
+                files: [params.filePath],
+                nodeId: node.nodeId
+              });
+              return { success: true, method: 'cdp_native', filePath: params.filePath };
+            }
+          } finally {
+            try { await chrome.debugger.detach({ tabId }); } catch (e) {}
+          }
+        } catch (dbgErr) {
+          console.warn('[Browser Operator] CDP file input failed, falling back to DataTransfer:', dbgErr);
+        }
+      }
+
+      // 2. Fallback: Base64 DataTransfer injection (bypasses OS file picker completely)
+      const injectionResults = await chrome.scripting.executeScript({
+        target: { tabId },
+        args: [
+          params.selector || 'input[type="file"]',
+          params.ref || null,
+          params.base64Data,
+          params.fileName || 'upload.jpg',
+          params.mimeType || 'image/jpeg'
+        ],
+        func: (selector, ref, base64Data, fileName, mimeType) => {
+          let el = null;
+          if (ref) el = document.querySelector(`[data-ag-ref="${ref}"]`);
+          if (!el && selector) el = document.querySelector(selector);
+          if (!el) el = document.querySelector('input[type="file"]');
+          if (!el) return { success: false, error: 'No file input found on page' };
+
+          try {
+            const byteCharacters = atob(base64Data);
+            const byteNumbers = new Array(byteCharacters.length);
+            for (let i = 0; i < byteCharacters.length; i++) {
+              byteNumbers[i] = byteCharacters.charCodeAt(i);
+            }
+            const byteArray = new Uint8Array(byteNumbers);
+            const blob = new Blob([byteArray], { type: mimeType });
+            const file = new File([blob], fileName, { type: mimeType, lastModified: Date.now() });
+
+            const dt = new DataTransfer();
+            dt.items.add(file);
+            el.files = dt.files;
+
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+
+            return { success: true, method: 'datatransfer_injected', fileName, fileSize: file.size };
+          } catch (err) {
+            return { success: false, error: err.message };
+          }
         }
       });
       return injectionResults[0]?.result || {};
@@ -387,7 +707,7 @@ async function handleAction(action, params = {}) {
       return { success: true };
     }
 
-    case 'evaluate': {
+    case 'video_control': {
       let tabId = params.tabId ? parseInt(params.tabId, 10) : null;
       if (!tabId) {
         const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -397,16 +717,70 @@ async function handleAction(action, params = {}) {
 
       const injectionResults = await chrome.scripting.executeScript({
         target: { tabId },
-        args: [params.script],
-        func: (code) => {
-          try {
-            return { result: eval(code) };
-          } catch (e) {
-            return { error: e.message };
-          }
+        args: [params.op || 'status', params.rate || null, params.seek !== undefined ? params.seek : null],
+        func: (op, rate, seek) => {
+          const v = document.querySelector('video');
+          if (!v) return { error: 'No video element found' };
+          if (op === 'play') v.play();
+          if (op === 'pause') v.pause();
+          if (rate) v.playbackRate = rate;
+          if (seek !== null && seek !== undefined) v.currentTime = seek;
+          return {
+            paused: v.paused,
+            currentTime: v.currentTime,
+            duration: v.duration,
+            playbackRate: v.playbackRate,
+            ended: v.ended
+          };
         }
       });
       return injectionResults[0]?.result || {};
+    }
+
+    case 'evaluate': {
+      let tabId = params.tabId ? parseInt(params.tabId, 10) : null;
+      if (!tabId) {
+        const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+        tabId = active?.id;
+      }
+      if (!tabId) throw new Error('No active tab found');
+
+      // 1. Try Chrome DevTools Protocol debugger first (bypasses CSP unsafe-eval completely)
+      try {
+        await chrome.debugger.attach({ tabId }, '1.3');
+        try {
+          const evalRes = await chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
+            expression: params.script || '',
+            returnByValue: true,
+            awaitPromise: true
+          });
+          if (evalRes && evalRes.exceptionDetails) {
+            return { error: evalRes.exceptionDetails.text || evalRes.exceptionDetails.exception?.description };
+          }
+          return evalRes.result ? evalRes.result.value : evalRes;
+        } finally {
+          try { await chrome.debugger.detach({ tabId }); } catch (e) {}
+        }
+      } catch (dbgErr) {
+        // Fallback to chrome.scripting.executeScript if debugger attach is unavailable
+        const injectionResults = await chrome.scripting.executeScript({
+          target: { tabId },
+          args: [params.script || ''],
+          func: (code) => {
+            try {
+              return { result: window.eval(code) };
+            } catch (e) {
+              return { error: e.message };
+            }
+          }
+        });
+        return injectionResults[0]?.result || {};
+      }
+    }
+
+    case 'reload_extension': {
+      setTimeout(() => { chrome.runtime.reload(); }, 100);
+      return { success: true };
     }
 
     default:

@@ -72,14 +72,18 @@ To protect your browser against unauthorized local access and malicious websites
 | `browser_list_tabs` | Returns all open tabs across your Chrome windows (ID, title, URL, active state). |
 | `browser_select_tab` | Focuses / switches to a specific tab by ID. |
 | `browser_navigate` | Navigates the current tab to any URL and waits for page load. |
-| `browser_click` | Clicks elements using CSS selectors or visible text. |
-| `browser_type` | Types into input / text fields with optional Enter keypress. |
-| `browser_get_dom` | Extracts title, URL, visible text, and HTML snippet. |
-| `browser_screenshot` | Captures visible screenshot of any tab. |
+| `browser_get_dom` | Extracts title, URL, visible text, links, and indexed interactive `elements` with numerical `ref` IDs (`[1]`, `[2]`, ...). |
+| `browser_click` | Clicks elements using an indexed `ref` (recommended), CSS selector, or visible text (smart-matches buttons/links/inputs and skips scripts/styles). |
+| `browser_type` | Types into input / text fields by `ref` or CSS selector with optional Enter keypress. |
+| `browser_select_option` | Selects an option from a `<select>` dropdown or custom listbox by `ref` or selector with `value` or `text`. |
+| `browser_set_checked` | Sets the checked state (`true`/`false`) of a checkbox, radio, or toggle switch by `ref` or selector. |
+| `browser_screenshot` | Captures visible screenshot of any tab and saves as a PNG image to disk. |
 | `browser_scroll` | Scrolls tab up or down smoothly. |
 | `browser_evaluate` | Executes arbitrary JavaScript inside the page context. |
+| `browser_upload_file` | Uploads local files to file inputs autonomously via Chrome DevTools Protocol & DataTransfer without opening OS file picker. |
 | `browser_new_tab` | Opens a new tab with a given URL. |
 | `browser_close_tab` | Closes any specific tab. |
+
 
 ---
 
