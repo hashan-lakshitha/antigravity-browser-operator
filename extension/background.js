@@ -537,6 +537,90 @@ async function handleAction(action, params = {}) {
       }
       if (!tabId) throw new Error('No active tab found');
 
+      // 1. Try Chrome DevTools Protocol for native input simulation (supports Lexical, Draft.js, React, multi-line)
+      try {
+        await chrome.debugger.attach({ tabId }, '1.3');
+        try {
+          // Focus element first
+          await chrome.scripting.executeScript({
+            target: { tabId },
+            args: [params.selector || null, params.ref || null],
+            func: (sel, r) => {
+              let el = r ? document.querySelector(`[data-ag-ref="${r}"]`) : null;
+              if (!el && sel) el = document.querySelector(sel);
+              if (!el) el = document.querySelector('div[role="textbox"][contenteditable="true"], [contenteditable="true"], textarea, input:not([type="hidden"])');
+              if (el) el.focus();
+            }
+          });
+
+          // Select all and Backspace to clear existing content cleanly
+          if (params.clear !== false) {
+            await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
+              type: 'rawKeyDown',
+              windowsVirtualKeyCode: 65,
+              modifiers: 2
+            });
+            await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
+              type: 'keyUp',
+              windowsVirtualKeyCode: 65,
+              modifiers: 2
+            });
+            await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
+              type: 'rawKeyDown',
+              windowsVirtualKeyCode: 8
+            });
+            await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
+              type: 'keyUp',
+              windowsVirtualKeyCode: 8
+            });
+          }
+
+          // Insert text natively line by line
+          const text = params.text || '';
+          const lines = text.split('\n');
+          for (let i = 0; i < lines.length; i++) {
+            if (lines[i].length > 0) {
+              await chrome.debugger.sendCommand({ tabId }, 'Input.insertText', { text: lines[i] });
+            }
+            if (i < lines.length - 1) {
+              await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
+                type: 'rawKeyDown',
+                key: 'Enter',
+                code: 'Enter',
+                text: '\r',
+                unmodifiedText: '\r',
+                windowsVirtualKeyCode: 13,
+                nativeVirtualKeyCode: 13
+              });
+              await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
+                type: 'keyUp',
+                key: 'Enter',
+                code: 'Enter',
+                windowsVirtualKeyCode: 13,
+                nativeVirtualKeyCode: 13
+              });
+            }
+          }
+
+          if (params.pressEnter) {
+            await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
+              type: 'rawKeyDown',
+              windowsVirtualKeyCode: 13
+            });
+            await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
+              type: 'keyUp',
+              windowsVirtualKeyCode: 13
+            });
+          }
+
+          return { success: true, method: 'cdp_native_type', textLength: text.length };
+        } finally {
+          try { await chrome.debugger.detach({ tabId }); } catch (e) {}
+        }
+      } catch (dbgErr) {
+        console.warn('[Browser Operator] CDP type failed, falling back to script:', dbgErr);
+      }
+
       const injectionResults = await chrome.scripting.executeScript({
         target: { tabId },
         args: [params.selector || null, params.text || '', !!params.pressEnter, params.ref || null],
@@ -667,29 +751,134 @@ async function handleAction(action, params = {}) {
       }
       if (!tabId) throw new Error('No active tab found');
 
-      // 1. Try Chrome DevTools Protocol DOM.setFileInputFiles first
+      // 1. Try Chrome DevTools Protocol with FileChooser interception or DOM.setFileInputFiles
       if (params.filePath) {
         try {
           await chrome.debugger.attach({ tabId }, '1.3');
           try {
+            await chrome.debugger.sendCommand({ tabId }, 'Page.enable', {});
+            await chrome.debugger.sendCommand({ tabId }, 'DOM.enable', {});
+
+            // Check if existing input[type="file"] exists first
             const doc = await chrome.debugger.sendCommand({ tabId }, 'DOM.getDocument', {});
             const selector = params.selector || 'input[type="file"]';
-            const node = await chrome.debugger.sendCommand({ tabId }, 'DOM.querySelector', {
-              nodeId: doc.root.nodeId,
-              selector
-            });
-            if (node && node.nodeId) {
+            let existingNode = null;
+            try {
+              existingNode = await chrome.debugger.sendCommand({ tabId }, 'DOM.querySelector', {
+                nodeId: doc.root.nodeId,
+                selector
+              });
+            } catch (e) {}
+
+            if (existingNode && existingNode.nodeId && !params.ref) {
               await chrome.debugger.sendCommand({ tabId }, 'DOM.setFileInputFiles', {
                 files: [params.filePath],
-                nodeId: node.nodeId
+                nodeId: existingNode.nodeId
               });
-              return { success: true, method: 'cdp_native', filePath: params.filePath };
+              await chrome.scripting.executeScript({
+                target: { tabId },
+                args: [selector],
+                func: (sel) => {
+                  const input = document.querySelector(sel);
+                  if (input) {
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                  }
+                }
+              });
+              return { success: true, method: 'cdp_native_existing', filePath: params.filePath };
+            }
+
+            // Intercept file chooser dialog (supports clicking buttons like "Add Video")
+            let fileChosen = false;
+            let fileError = null;
+
+            const onEvent = async (source, method, eventParams) => {
+              if (source.tabId === tabId && method === 'Page.fileChooserOpened') {
+                try {
+                  await chrome.debugger.sendCommand({ tabId }, 'DOM.setFileInputFiles', {
+                    files: [params.filePath],
+                    backendNodeId: eventParams.backendNodeId
+                  });
+                  fileChosen = true;
+                } catch (err) {
+                  fileError = err;
+                }
+              }
+            };
+
+            chrome.debugger.onEvent.addListener(onEvent);
+            try {
+              await chrome.debugger.sendCommand({ tabId }, 'Page.setInterceptFileChooserDialog', { enabled: true });
+
+              // Get element position for trusted native CDP mouse click
+              const coordsRes = await chrome.scripting.executeScript({
+                target: { tabId },
+                args: [params.selector || null, params.ref || null],
+                func: (sel, r) => {
+                  let el = r ? document.querySelector(`[data-ag-ref="${r}"]`) : null;
+                  if (!el && sel) el = document.querySelector(sel);
+                  if (!el) {
+                    const btns = Array.from(document.querySelectorAll('button, div[role="button"]'));
+                    el = btns.find(b => (b.innerText || '').toLowerCase().includes('add video'));
+                  }
+                  if (!el) return null;
+                  const rect = el.getBoundingClientRect();
+                  return {
+                    x: Math.round(rect.x + rect.width / 2),
+                    y: Math.round(rect.y + rect.height / 2)
+                  };
+                }
+              });
+
+              const coords = coordsRes[0]?.result;
+              if (coords) {
+                await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+                  type: 'mousePressed',
+                  x: coords.x,
+                  y: coords.y,
+                  button: 'left',
+                  clickCount: 1
+                });
+                await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+                  type: 'mouseReleased',
+                  x: coords.x,
+                  y: coords.y,
+                  button: 'left',
+                  clickCount: 1
+                });
+              } else {
+                await chrome.scripting.executeScript({
+                  target: { tabId },
+                  func: () => {
+                    const btns = Array.from(document.querySelectorAll('button, div[role="button"]'));
+                    const el = btns.find(b => (b.innerText || '').toLowerCase().includes('add video'));
+                    if (el) el.click();
+                  }
+                });
+              }
+
+              // Wait up to 6 seconds for fileChooserOpened event
+              for (let i = 0; i < 60; i++) {
+                if (fileChosen || fileError) break;
+                await new Promise(r => setTimeout(r, 100));
+              }
+
+              if (fileChosen) {
+                return { success: true, method: 'cdp_file_chooser_intercepted', filePath: params.filePath };
+              }
+              if (fileError) throw fileError;
+            } finally {
+              chrome.debugger.onEvent.removeListener(onEvent);
+              try {
+                await chrome.debugger.sendCommand({ tabId }, 'Page.setInterceptFileChooserDialog', { enabled: false });
+              } catch (e) {}
             }
           } finally {
             try { await chrome.debugger.detach({ tabId }); } catch (e) {}
           }
         } catch (dbgErr) {
-          console.warn('[Browser Operator] CDP file input failed, falling back to DataTransfer:', dbgErr);
+          console.warn('[Browser Operator] CDP file upload failed, falling back to DataTransfer:', dbgErr);
         }
       }
 
@@ -707,6 +896,26 @@ async function handleAction(action, params = {}) {
           let el = null;
           if (ref) el = document.querySelector(`[data-ag-ref="${ref}"]`);
           if (!el && selector) el = document.querySelector(selector);
+
+          // If targeted element is a button (e.g. Add Video) and not a file input, click it while intercepting input creation
+          if (el && el.tagName !== 'INPUT') {
+            const originalClick = HTMLInputElement.prototype.click;
+            let intercepted = null;
+            HTMLInputElement.prototype.click = function() {
+              if (this.type === 'file') {
+                intercepted = this;
+                return;
+              }
+              return originalClick.apply(this, arguments);
+            };
+            try {
+              el.click();
+              if (intercepted) el = intercepted;
+            } finally {
+              HTMLInputElement.prototype.click = originalClick;
+            }
+          }
+
           if (!el) el = document.querySelector('input[type="file"]');
           if (!el) return { success: false, error: 'No file input found on page' };
 
