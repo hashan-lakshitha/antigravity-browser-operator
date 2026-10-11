@@ -8,6 +8,7 @@ const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio
 const { CallToolRequestSchema, ListToolsRequestSchema } = require('@modelcontextprotocol/sdk/types.js');
 
 const { getOrCreateToken } = require('./auth.js');
+const memory = require('./memory.js');
 
 const WS_PORT = 8765;
 function getBridgeUrl() {
@@ -174,6 +175,22 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'browser_batch_actions',
+        description: 'Executes multiple sequential browser actions (click, type, wait, scroll, select_option, set_checked, navigate) in a single turn without round-trip LLM pauses. Drastically speeds up multi-step tasks, form filling, and searching.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            actions: {
+              type: 'array',
+              description: 'Array of actions to execute sequentially. Supported types: "click" (ref, selector, text), "type" (ref, selector, text, pressEnter), "wait" (ms), "scroll" (direction, amount), "select_option" (ref, value, text), "set_checked" (ref, checked), "navigate" (url).',
+              items: { type: 'object' }
+            },
+            tabId: { type: 'number', description: 'Optional tab ID.' }
+          },
+          required: ['actions']
+        }
+      },
+      {
         name: 'browser_navigate',
         description: 'Navigates the specified or active tab in the user’s Chrome browser to a URL and waits for page load.',
         inputSchema: {
@@ -181,16 +198,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             url: { type: 'string', description: 'The URL to navigate to.' },
             tabId: { type: 'number', description: 'Optional tab ID. If omitted, navigates the active tab.' },
+            waitUntil: { type: 'string', enum: ['interactive', 'complete'], description: 'Wait condition: "interactive" (default, fast - resolves as soon as DOM is ready) or "complete" (waits for all background ads/trackers).' }
           },
           required: ['url'],
         },
       },
       {
         name: 'browser_get_dom',
-        description: 'Extracts the page title, URL, visible text content, and HTML snippet of the specified or active tab.',
+        description: 'Extracts the page title, URL, token-dense compact DOM representation, indexed interactive elements with refs, and clean text of the tab.',
         inputSchema: {
           type: 'object',
-          properties: { tabId: { type: 'number', description: 'Optional tab ID.' } },
+          properties: {
+            tabId: { type: 'number', description: 'Optional tab ID.' },
+            maxTextLength: { type: 'number', description: 'Maximum characters of body text to extract (defaults to 3000 to save tokens).' },
+            includeLinks: { type: 'boolean', description: 'Whether to include standalone links array (defaults to false as elements already index links).' }
+          },
         },
       },
       {
@@ -264,11 +286,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'browser_screenshot',
-        description: 'Captures a visible screenshot of the active or specified tab in Chrome and saves it as a PNG image on disk.',
+        description: 'Captures a visible screenshot of the active or specified tab in Chrome and saves it as an image on disk.',
         inputSchema: {
           type: 'object',
           properties: {
-            savePath: { type: 'string', description: 'Optional file path to save the PNG image. If omitted, saves to project screenshots folder.' },
+            savePath: { type: 'string', description: 'Optional file path to save the image. If omitted, saves to project screenshots folder.' },
+            format: { type: 'string', enum: ['jpeg', 'png'], description: 'Image format (defaults to "jpeg" for fast lightweight transfer).' },
+            quality: { type: 'number', description: 'Compression quality 1-100 (defaults to 80 for jpeg).' },
             tabId: { type: 'number', description: 'Optional tab ID.' },
           },
         },
@@ -311,6 +335,62 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           },
         },
       },
+      {
+        name: 'browser_save_recipe',
+        description: 'Saves a successful multi-step workflow/macro into the agent’s muscle memory. Stored recipes can be recalled and executed in seconds for repetitive site tasks.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'Unique identifier name for this workflow (e.g. "search_daraz_item", "upload_facebook_reel").' },
+            domain: { type: 'string', description: 'Domain name for this recipe (e.g. "facebook.com", "google.com").' },
+            description: { type: 'string', description: 'What this recipe accomplishes.' },
+            actions: {
+              type: 'array',
+              description: 'Array of batch actions (click, type, wait, scroll, select_option, set_checked) that form the recipe.',
+              items: { type: 'object' }
+            },
+            notes: { type: 'string', description: 'Optional tips or timing notes.' }
+          },
+          required: ['name', 'domain', 'actions']
+        }
+      },
+      {
+        name: 'browser_find_recipe',
+        description: 'Searches the agent’s muscle memory for existing recipes on a domain or task. Returns stored action sequences ready to run via browser_batch_actions.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            domain: { type: 'string', description: 'Optional domain to filter recipes (e.g. "facebook.com").' },
+            query: { type: 'string', description: 'Search keywords describing the desired task (e.g. "upload", "search").' }
+          }
+        }
+      },
+      {
+        name: 'browser_learn_site_quirk',
+        description: 'Records a site-specific quirk, pitfall, selector tip, or bypass rule into the long-term knowledge library.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            domain: { type: 'string', description: 'Website domain (e.g. "facebook.com", "youtube.com").' },
+            quirk: { type: 'string', description: 'The observed quirk or behavior (e.g. "Search box uses div[role=textbox] not input").' },
+            category: { type: 'string', enum: ['modal_dialog', 'input_quirk', 'file_upload', 'navigation', 'security', 'general'], description: 'Category of quirk.' },
+            advice: { type: 'string', description: 'Recommended solution or strategy for future agents.' },
+            selector: { type: 'string', description: 'Optional reliable CSS selector.' }
+          },
+          required: ['domain', 'quirk']
+        }
+      },
+      {
+        name: 'browser_get_site_memory',
+        description: 'Retrieves all learned knowledge, known quirks, and saved recipes for a specific domain or the active tab.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            domain: { type: 'string', description: 'Website domain or URL to inspect memory for.' },
+            tabId: { type: 'number', description: 'Optional tab ID to extract domain from active tab.' }
+          }
+        }
+      },
     ],
   };
 });
@@ -337,12 +417,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const result = await sendAction('close_tab', { tabId: args.tabId });
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
       }
+      case 'browser_batch_actions': {
+        const result = await sendAction('batch_actions', {
+          actions: args.actions,
+          tabId: args.tabId
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      }
       case 'browser_navigate': {
-        const result = await sendAction('navigate', { url: args.url, tabId: args.tabId });
+        const result = await sendAction('navigate', {
+          url: args.url,
+          tabId: args.tabId,
+          waitUntil: args.waitUntil || 'interactive'
+        });
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
       }
       case 'browser_get_dom': {
-        const result = await sendAction('get_dom', { tabId: args.tabId });
+        const result = await sendAction('get_dom', {
+          tabId: args.tabId,
+          maxTextLength: args.maxTextLength,
+          includeLinks: args.includeLinks
+        });
+        if (result && result.url) {
+          try {
+            const domainIntel = memory.getSiteIntelligence(result.url);
+            if (domainIntel && (domainIntel.knownQuirks.length > 0 || domainIntel.savedRecipes.length > 0)) {
+              result.siteMemory = domainIntel;
+            }
+          } catch (e) {}
+        }
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       }
       case 'browser_click': {
@@ -366,17 +469,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
       }
       case 'browser_screenshot': {
-        const result = await sendAction('screenshot', { tabId: args.tabId });
+        const result = await sendAction('screenshot', {
+          tabId: args.tabId,
+          format: args.format || 'jpeg',
+          quality: args.quality || 80
+        });
         let savedPath = null;
         if (result && result.dataUrl) {
           try {
-            const base64Data = result.dataUrl.replace(/^data:image\/png;base64,/, '');
+            const matches = result.dataUrl.match(/^data:image\/([a-zA-Z]+);base64,(.+)$/);
+            const ext = matches ? (matches[1] === 'jpeg' ? 'jpg' : matches[1]) : (result.format || 'jpg');
+            const base64Data = matches ? matches[2] : result.dataUrl.replace(/^data:image\/\w+;base64,/, '');
             const buffer = Buffer.from(base64Data, 'base64');
             const screenshotsDir = path.resolve(__dirname, '..', 'screenshots');
             if (!fs.existsSync(screenshotsDir)) {
               fs.mkdirSync(screenshotsDir, { recursive: true });
             }
-            savedPath = args.savePath ? path.resolve(args.savePath) : path.join(screenshotsDir, `screenshot_${Date.now()}.png`);
+            savedPath = args.savePath ? path.resolve(args.savePath) : path.join(screenshotsDir, `screenshot_${Date.now()}.${ext}`);
             const targetDir = path.dirname(savedPath);
             if (!fs.existsSync(targetDir)) {
               fs.mkdirSync(targetDir, { recursive: true });
@@ -391,6 +500,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             type: 'text',
             text: JSON.stringify({
               success: !!(result && result.dataUrl),
+              format: result && result.format ? result.format : 'jpeg',
               savedPath: savedPath || undefined,
               fileUrl: savedPath ? `file:///${savedPath.replace(/\\/g, '/')}` : undefined,
               dataLength: result && result.dataUrl ? result.dataUrl.length : 0
@@ -434,6 +544,39 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           accept: args.accept !== undefined ? args.accept : true,
           promptText: args.promptText
         });
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      }
+      case 'browser_save_recipe': {
+        const result = memory.saveRecipe({
+          name: args.name,
+          domain: args.domain,
+          description: args.description,
+          actions: args.actions,
+          notes: args.notes
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      }
+      case 'browser_find_recipe': {
+        const result = memory.findRecipe(args.query, args.domain);
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      }
+      case 'browser_learn_site_quirk': {
+        const result = memory.recordSiteQuirk({
+          domain: args.domain,
+          quirk: args.quirk,
+          category: args.category || 'general',
+          advice: args.advice,
+          selector: args.selector
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      }
+      case 'browser_get_site_memory': {
+        let domain = args.domain;
+        if (!domain) {
+          const tab = await sendAction('get_active_tab');
+          if (tab && tab.url) domain = tab.url;
+        }
+        const result = memory.getSiteIntelligence(domain) || { domain, knownQuirks: [], savedRecipes: [] };
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       }
       default:

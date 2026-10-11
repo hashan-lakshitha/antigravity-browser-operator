@@ -1,0 +1,83 @@
+{
+  "_meta": {
+    "description": "Site quirks and learned tips database for autonomous browser navigation"
+  },
+  "sites": {
+    "facebook.com": {
+      "domain": "facebook.com",
+      "firstRecorded": "2026-10-11T16:27:18.783Z",
+      "quirks": [
+        {
+          "quirk": "Unsaved post/reel navigation triggers native beforeunload prompt",
+          "category": "modal_dialog",
+          "advice": "Auto-bypassed by navigate, or use browser_handle_dialog to accept.",
+          "timesObserved": 1,
+          "recordedAt": "2026-10-11T16:27:18.783Z",
+          "lastObserved": "2026-10-11T16:27:18.783Z"
+        },
+        {
+          "quirk": "Reels and Posts use Draft.js / Lexical rich text editors",
+          "category": "input_quirk",
+          "advice": "browser_type handles this natively via CDP Input.insertText with auto-selection clearing.",
+          "timesObserved": 1,
+          "recordedAt": "2026-10-11T16:27:18.784Z",
+          "lastObserved": "2026-10-11T16:27:18.784Z"
+        },
+        {
+          "quirk": "Media upload buttons open OS file picker",
+          "category": "file_upload",
+          "advice": "Always use browser_upload_file tool with absolute filePath to bypass OS file dialog.",
+          "timesObserved": 1,
+          "recordedAt": "2026-10-11T16:27:18.785Z",
+          "lastObserved": "2026-10-11T16:27:18.785Z"
+        }
+      ],
+      "lastUpdated": "2026-10-11T16:27:18.785Z"
+    },
+    "google.com": {
+      "domain": "google.com",
+      "firstRecorded": "2026-10-11T16:27:18.786Z",
+      "quirks": [
+        {
+          "quirk": "Search input accepts Enter key directly",
+          "category": "search",
+          "advice": "Use browser_type with pressEnter: true to immediately submit queries.",
+          "timesObserved": 1,
+          "recordedAt": "2026-10-11T16:27:18.786Z",
+          "lastObserved": "2026-10-11T16:27:18.786Z"
+        }
+      ],
+      "lastUpdated": "2026-10-11T16:27:18.786Z"
+    },
+    "github.com": {
+      "domain": "github.com",
+      "firstRecorded": "2026-10-11T16:27:18.787Z",
+      "quirks": [
+        {
+          "quirk": "Strict CSP disallows inline eval",
+          "category": "security",
+          "advice": "Use browser_get_dom and ref-based browser_click rather than eval.",
+          "timesObserved": 1,
+          "recordedAt": "2026-10-11T16:27:18.787Z",
+          "lastObserved": "2026-10-11T16:27:18.787Z"
+        }
+      ],
+      "lastUpdated": "2026-10-11T16:27:18.787Z"
+    },
+    "daraz.lk": {
+      "domain": "daraz.lk",
+      "firstRecorded": "2026-10-11T16:28:49.104Z",
+      "quirks": [
+        {
+          "quirk": "Daraz popup discount banner appears on first visit",
+          "category": "modal_dialog",
+          "advice": "Click the close button on the discount modal if present",
+          "timesObserved": 1,
+          "recordedAt": "2026-10-11T16:28:49.104Z",
+          "lastObserved": "2026-10-11T16:28:49.104Z"
+        }
+      ],
+      "lastUpdated": "2026-10-11T16:28:49.104Z"
+    }
+  }
+}

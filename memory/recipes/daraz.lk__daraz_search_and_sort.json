@@ -1,0 +1,27 @@
+{
+  "name": "daraz_search_and_sort",
+  "title": "daraz_search_and_sort",
+  "domain": "daraz.lk",
+  "description": "Searches for a product on Daraz and sorts by price low to high",
+  "actions": [
+    {
+      "type": "type",
+      "selector": "#q",
+      "text": "wireless earbuds",
+      "pressEnter": true
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "click",
+      "text": "Price low to high"
+    }
+  ],
+  "notes": "Daraz search input has id #q",
+  "timesUsed": 1,
+  "successCount": 1,
+  "createdAt": "2026-10-11T16:28:49.099Z",
+  "updatedAt": "2026-10-11T16:28:49.099Z"
+}

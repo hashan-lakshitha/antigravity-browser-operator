@@ -242,6 +242,51 @@ async function handleAction(action, params = {}) {
       return { success: true };
     }
 
+    case 'batch_actions': {
+      let tabId = params.tabId ? parseInt(params.tabId, 10) : null;
+      if (!tabId) {
+        const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+        tabId = active?.id;
+      }
+      if (!tabId) throw new Error('No active tab found');
+
+      const actions = Array.isArray(params.actions) ? params.actions : [];
+      const results = [];
+
+      for (let i = 0; i < actions.length; i++) {
+        const item = actions[i];
+        const actionType = item.type || item.action;
+        let actRes = null;
+
+        if (actionType === 'wait') {
+          const ms = item.ms || item.time || 500;
+          await new Promise(r => setTimeout(r, Math.min(ms, 15000)));
+          actRes = { success: true, waitedMs: ms };
+        } else if (actionType === 'click') {
+          actRes = await handleAction('click', { ...item, tabId });
+        } else if (actionType === 'type') {
+          actRes = await handleAction('type', { ...item, tabId });
+        } else if (actionType === 'select_option') {
+          actRes = await handleAction('select_option', { ...item, tabId });
+        } else if (actionType === 'set_checked') {
+          actRes = await handleAction('set_checked', { ...item, tabId });
+        } else if (actionType === 'scroll') {
+          actRes = await handleAction('scroll', { ...item, tabId });
+        } else if (actionType === 'navigate') {
+          actRes = await handleAction('navigate', { ...item, tabId });
+        } else {
+          actRes = { error: `Unsupported batch action: ${actionType}` };
+        }
+
+        results.push({ index: i, type: actionType, result: actRes });
+        if (actRes && (actRes.error || actRes.success === false) && !item.continueOnError) {
+          break;
+        }
+      }
+
+      return { success: true, executedCount: results.length, results };
+    }
+
     case 'navigate': {
       let tabId = params.tabId ? parseInt(params.tabId, 10) : null;
       if (!tabId) {
@@ -266,20 +311,62 @@ async function handleAction(action, params = {}) {
 
       await chrome.tabs.update(tabId, { url: params.url });
 
-      // Wait for tab to complete loading (up to 15s)
-      await new Promise((resolve) => {
-        const listener = (updatedTabId, info) => {
-          if (updatedTabId === tabId && info.status === 'complete') {
+      // Fast wait: wait for 'interactive' (DOMContentLoaded) by default or 'complete'
+      const waitUntil = params.waitUntil || 'interactive';
+      if (waitUntil === 'complete') {
+        await new Promise((resolve) => {
+          const listener = (updatedTabId, info) => {
+            if (updatedTabId === tabId && info.status === 'complete') {
+              chrome.tabs.onUpdated.removeListener(listener);
+              resolve();
+            }
+          };
+          chrome.tabs.onUpdated.addListener(listener);
+          setTimeout(() => {
             chrome.tabs.onUpdated.removeListener(listener);
             resolve();
-          }
-        };
-        chrome.tabs.onUpdated.addListener(listener);
-        setTimeout(() => {
-          chrome.tabs.onUpdated.removeListener(listener);
-          resolve();
-        }, 15000);
-      });
+          }, 15000);
+        });
+      } else {
+        // Fast path: resolves as soon as DOM is interactive or title is loaded
+        await new Promise((resolve) => {
+          let resolved = false;
+          const finish = () => {
+            if (!resolved) {
+              resolved = true;
+              chrome.tabs.onUpdated.removeListener(listener);
+              resolve();
+            }
+          };
+          const listener = (updatedTabId, info) => {
+            if (updatedTabId === tabId && (info.status === 'complete' || info.title)) {
+              finish();
+            }
+          };
+          chrome.tabs.onUpdated.addListener(listener);
+
+          // Poll document.readyState (usually ready in 400-800ms)
+          (async () => {
+            for (let i = 0; i < 20; i++) {
+              if (resolved) return;
+              try {
+                const [res] = await chrome.scripting.executeScript({
+                  target: { tabId },
+                  func: () => document.readyState
+                });
+                if (res && (res.result === 'interactive' || res.result === 'complete')) {
+                  finish();
+                  return;
+                }
+              } catch (e) {}
+              await new Promise(r => setTimeout(r, 200));
+            }
+            finish();
+          })();
+
+          setTimeout(finish, 8000);
+        });
+      }
 
       const updatedTab = await chrome.tabs.get(tabId);
       return { success: true, tabId, title: updatedTab.title, url: updatedTab.url };
@@ -290,9 +377,42 @@ async function handleAction(action, params = {}) {
       let targetTabId = null;
       if (params.tabId) {
         targetTabId = parseInt(params.tabId, 10);
-        const tab = await chrome.tabs.get(targetTabId);
-        windowId = tab.windowId;
+      } else {
+        const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+        targetTabId = active?.id;
       }
+      if (targetTabId) {
+        try {
+          const tab = await chrome.tabs.get(targetTabId);
+          windowId = tab?.windowId;
+        } catch (e) {}
+      }
+
+      const imgFormat = params.format === 'png' ? 'png' : 'jpeg';
+      const imgQuality = typeof params.quality === 'number' ? params.quality : 80;
+
+      // 1. Try CDP Page.captureScreenshot first (fast, works even if window is behind or unfocused)
+      if (targetTabId) {
+        try {
+          try { await chrome.debugger.detach({ tabId: targetTabId }); } catch (e) {}
+          await chrome.debugger.attach({ tabId: targetTabId }, '1.3');
+          try {
+            await chrome.debugger.sendCommand({ tabId: targetTabId }, 'Page.enable', {});
+            const cdpOpts = { format: imgFormat };
+            if (imgFormat === 'jpeg') cdpOpts.quality = imgQuality;
+            const res = await chrome.debugger.sendCommand({ tabId: targetTabId }, 'Page.captureScreenshot', cdpOpts);
+            if (res && res.data) {
+              return { success: true, dataUrl: `data:image/${imgFormat};base64,` + res.data, format: imgFormat };
+            }
+          } finally {
+            try { await chrome.debugger.detach({ tabId: targetTabId }); } catch (e) {}
+          }
+        } catch (dbgErr) {
+          console.warn('[Browser Operator] CDP screenshot failed, falling back to captureVisibleTab:', dbgErr);
+        }
+      }
+
+      // 2. Fallback: captureVisibleTab with timeout
       if (windowId) {
         try {
           const win = await chrome.windows.get(windowId);
@@ -302,25 +422,17 @@ async function handleAction(action, params = {}) {
           }
         } catch (e) {}
       }
-      try {
-        const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: 'png' });
-        return { success: true, dataUrl };
-      } catch (err) {
-        if (targetTabId) {
-          try {
-            await chrome.debugger.attach({ tabId: targetTabId }, '1.3');
-            try {
-              const res = await chrome.debugger.sendCommand({ tabId: targetTabId }, 'Page.captureScreenshot', { format: 'png' });
-              if (res && res.data) {
-                return { success: true, dataUrl: 'data:image/png;base64,' + res.data };
-              }
-            } finally {
-              try { await chrome.debugger.detach({ tabId: targetTabId }); } catch(e){}
-            }
-          } catch (dbgErr) {}
-        }
-        throw err;
-      }
+      const captureOpts = { format: imgFormat };
+      if (imgFormat === 'jpeg') captureOpts.quality = imgQuality;
+      const dataUrl = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('captureVisibleTab timed out')), 3000);
+        chrome.tabs.captureVisibleTab(windowId, captureOpts, (res) => {
+          clearTimeout(timer);
+          if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+          else resolve(res);
+        });
+      });
+      return { success: true, dataUrl, format: imgFormat };
     }
 
     case 'handle_dialog': {
@@ -367,52 +479,96 @@ async function handleAction(action, params = {}) {
       }
       if (!tabId) throw new Error('No active tab found');
 
+      const maxTextLength = typeof params.maxTextLength === 'number' ? params.maxTextLength : 3000;
+      const includeLinks = Boolean(params.includeLinks);
+
       const injectionResults = await chrome.scripting.executeScript({
         target: { tabId },
-        func: () => {
-          const links = Array.from(document.querySelectorAll('a[href]'))
-            .map(a => ({ text: a.innerText.trim(), href: a.href }))
-            .filter(l => l.text.length > 0)
-            .slice(0, 100);
-
+        args: [maxTextLength, includeLinks],
+        func: (maxText, withLinks) => {
           // Tag and index visible interactive elements
           const interactiveSelectors = 'button, a, input, select, textarea, [role="button"], [role="link"], [role="checkbox"], [role="switch"], [role="tab"], [role="menuitem"], label, summary';
           const candidates = Array.from(document.querySelectorAll(interactiveSelectors));
           
           let refCounter = 1;
           const elements = [];
+          const compactLines = [];
+
           for (const el of candidates) {
-            // Check visibility
-            const rect = el.getBoundingClientRect();
-            const isVisible = (rect.width > 0 || rect.height > 0) && window.getComputedStyle(el).visibility !== 'hidden' && window.getComputedStyle(el).display !== 'none';
+            // High-speed native visibility check (Blink C++) - prevents layout reflow thrashing
+            let isVisible = false;
+            if (typeof el.checkVisibility === 'function') {
+              isVisible = el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+            } else {
+              const rect = el.getBoundingClientRect();
+              isVisible = (rect.width > 0 || rect.height > 0) && window.getComputedStyle(el).display !== 'none';
+            }
             if (!isVisible) continue;
 
             const ref = String(refCounter++);
             el.setAttribute('data-ag-ref', ref);
 
-            const text = (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('title') || '').trim().slice(0, 80);
+            const rawText = (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('title') || '').trim();
+            const text = rawText.replace(/\s+/g, ' ').slice(0, 80);
+            const tag = el.tagName.toLowerCase();
+            const role = el.getAttribute('role') || undefined;
+            const type = el.type || undefined;
+            const checked = typeof el.checked === 'boolean' ? el.checked : (el.getAttribute('aria-checked') === 'true' ? true : (el.getAttribute('aria-checked') === 'false' ? false : undefined));
+
             elements.push({
               ref,
-              tag: el.tagName.toLowerCase(),
-              type: el.type || undefined,
-              role: el.getAttribute('role') || undefined,
+              tag,
+              type,
+              role,
               text: text || undefined,
               name: el.name || undefined,
               placeholder: el.placeholder || undefined,
               href: el.href ? el.href.slice(0, 120) : undefined,
-              checked: typeof el.checked === 'boolean' ? el.checked : (el.getAttribute('aria-checked') === 'true' ? true : (el.getAttribute('aria-checked') === 'false' ? false : undefined))
+              checked
             });
+
+            // Token-dense compact single-line representation
+            let desc = `[${ref}] <${tag}`;
+            if (type && type !== 'text') desc += ` type="${type}"`;
+            if (role && role !== tag) desc += ` role="${role}"`;
+            desc += `>`;
+            if (text) desc += ` "${text}"`;
+            if (el.placeholder) desc += ` (placeholder: "${el.placeholder}")`;
+            if (el.href) {
+              const pathOnly = el.href.replace(window.location.origin, '');
+              desc += ` (href: ${pathOnly.slice(0, 45)})`;
+            }
+            if (checked !== undefined) desc += ` [checked: ${checked}]`;
+            compactLines.push(desc);
 
             if (elements.length >= 150) break;
           }
 
-          return {
+          // Clean, meaningful body text (stripped of script/style/nav noise and truncated)
+          let bodyText = '';
+          if (document.body && maxText > 0) {
+            bodyText = (document.body.innerText || '')
+              .replace(/\n\s*\n+/g, '\n')
+              .trim()
+              .slice(0, maxText);
+          }
+
+          const resObj = {
             title: document.title,
             url: window.location.href,
-            innerText: document.body ? document.body.innerText.slice(0, 50000) : '',
-            links,
-            elements
+            compactDom: compactLines.join('\n'),
+            elements,
+            innerText: bodyText
           };
+
+          if (withLinks) {
+            resObj.links = Array.from(document.querySelectorAll('a[href]'))
+              .map(a => ({ text: a.innerText.trim(), href: a.href }))
+              .filter(l => l.text.length > 0)
+              .slice(0, 30);
+          }
+
+          return resObj;
         }
       });
       return injectionResults[0]?.result || {};
@@ -434,7 +590,7 @@ async function handleAction(action, params = {}) {
           if (x !== null && y !== null) {
             el = document.elementFromPoint(x, y);
             if (!el) {
-              return { success: true, tagName: 'COORDINATE', text: '', x, y };
+              return { success: true, tagName: 'COORDINATE', text: '', x, y, isCoordinate: true };
             }
           }
           if (!el && ref) {
@@ -497,34 +653,39 @@ async function handleAction(action, params = {}) {
             ref: el.getAttribute('data-ag-ref') || undefined,
             text: (el.innerText || el.value || '').trim().slice(0, 100),
             x: x !== null ? x : Math.round(rect.left + rect.width / 2),
-            y: y !== null ? y : Math.round(rect.top + rect.height / 2)
+            y: y !== null ? y : Math.round(rect.top + rect.height / 2),
+            isCanvas: el.tagName === 'CANVAS'
           };
         }
       });
 
       const res = injectionResults[0]?.result || {};
-      if (res.x !== undefined && res.y !== undefined && res.x > 0 && res.y > 0) {
-        try {
-          await chrome.debugger.attach({ tabId }, '1.3');
+      // Only invoke slow CDP debugger if coordinate click or canvas was targeted
+      if ((params.x !== undefined && params.y !== undefined) || res.isCanvas || res.isCoordinate) {
+        if (res.x !== undefined && res.y !== undefined && res.x > 0 && res.y > 0) {
           try {
-            await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
-              type: 'mousePressed',
-              x: res.x,
-              y: res.y,
-              button: 'left',
-              clickCount: 1
-            });
-            await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
-              type: 'mouseReleased',
-              x: res.x,
-              y: res.y,
-              button: 'left',
-              clickCount: 1
-            });
-          } finally {
             try { await chrome.debugger.detach({ tabId }); } catch (e) {}
-          }
-        } catch (dbgErr) {}
+            await chrome.debugger.attach({ tabId }, '1.3');
+            try {
+              await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+                type: 'mousePressed',
+                x: res.x,
+                y: res.y,
+                button: 'left',
+                clickCount: 1
+              });
+              await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+                type: 'mouseReleased',
+                x: res.x,
+                y: res.y,
+                button: 'left',
+                clickCount: 1
+              });
+            } finally {
+              try { await chrome.debugger.detach({ tabId }); } catch (e) {}
+            }
+          } catch (dbgErr) {}
+        }
       }
       return res;
     }
@@ -539,6 +700,7 @@ async function handleAction(action, params = {}) {
 
       // 1. Try Chrome DevTools Protocol for native input simulation (supports Lexical, Draft.js, React, multi-line)
       try {
+        try { await chrome.debugger.detach({ tabId }); } catch (e) {}
         await chrome.debugger.attach({ tabId }, '1.3');
         try {
           // Focus element first
@@ -1006,6 +1168,7 @@ async function handleAction(action, params = {}) {
 
       // 1. Try Chrome DevTools Protocol debugger first (bypasses CSP unsafe-eval completely)
       try {
+        try { await chrome.debugger.detach({ tabId }); } catch (e) {}
         await chrome.debugger.attach({ tabId }, '1.3');
         try {
           const evalRes = await chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {

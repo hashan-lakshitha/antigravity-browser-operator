@@ -20,3 +20,5 @@ Desktop.ini
 .agent
 .agents/
 screenshots/
+*.crx
+*.pem
