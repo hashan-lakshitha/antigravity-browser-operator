@@ -9,7 +9,9 @@ let isConnecting = false;
 
 console.log('[Antigravity] Background service worker initialized');
 
-// Storage helper functions for security token
+let currentProfile = null;
+
+// Storage helper functions for security token & profile
 async function getStoredToken() {
   try {
     const data = await chrome.storage.local.get(['antigravity_token']);
@@ -17,6 +19,34 @@ async function getStoredToken() {
   } catch (e) {
     return null;
   }
+}
+
+async function getStoredProfileLabel() {
+  try {
+    const data = await chrome.storage.local.get(['antigravity_profile_label']);
+    return data.antigravity_profile_label ? data.antigravity_profile_label.trim() : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function getProfileIdentity() {
+  try {
+    if (chrome.identity && chrome.identity.getProfileUserInfo) {
+      return new Promise((resolve) => {
+        chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' }, (userInfo) => {
+          if (chrome.runtime.lastError || !userInfo || !userInfo.email) {
+            chrome.identity.getProfileUserInfo((info) => {
+              resolve(info?.email || '');
+            });
+          } else {
+            resolve(userInfo.email || '');
+          }
+        });
+      });
+    }
+  } catch (e) {}
+  return '';
 }
 
 async function setStoredToken(token) {
@@ -45,6 +75,26 @@ async function setStoredToken(token) {
   }
 }
 
+async function setStoredProfileLabel(label) {
+  try {
+    if (label && label.trim()) {
+      await chrome.storage.local.set({ antigravity_profile_label: label.trim() });
+    } else {
+      await chrome.storage.local.remove('antigravity_profile_label');
+    }
+    currentProfile = label ? label.trim() : null;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({
+        action: 'set_profile',
+        profile: currentProfile
+      }));
+    }
+    notifyPopup({ type: 'STATUS_CHANGE', connected: isConnected, profile: currentProfile });
+  } catch (e) {
+    console.error('[Antigravity] Failed to save profile label:', e);
+  }
+}
+
 // Connect to local Antigravity MCP Bridge
 async function connectBridge() {
   if (isConnecting) return;
@@ -54,13 +104,18 @@ async function connectBridge() {
 
   isConnecting = true;
   try {
-    const token = await getStoredToken();
+    const [token, storedLabel, detectedEmail] = await Promise.all([
+      getStoredToken(),
+      getStoredProfileLabel(),
+      getProfileIdentity()
+    ]);
+
     if (!token) {
       console.warn('[Antigravity] No auth token found. Token configuration required.');
       isConnected = false;
       authRequired = true;
       authError = 'Security token required. Please enter the token in the extension popup.';
-      notifyPopup({ type: 'STATUS_CHANGE', connected: false, authRequired, authError });
+      notifyPopup({ type: 'STATUS_CHANGE', connected: false, authRequired, authError, profile: storedLabel || detectedEmail || 'Unknown' });
       return;
     }
 
@@ -68,7 +123,11 @@ async function connectBridge() {
       return;
     }
 
-    const bridgeUrl = `${WS_URL}?token=${encodeURIComponent(token)}`;
+    const queryParams = new URLSearchParams({ token });
+    if (storedLabel) queryParams.set('profile', storedLabel);
+    if (detectedEmail) queryParams.set('email', detectedEmail);
+
+    const bridgeUrl = `${WS_URL}?${queryParams.toString()}`;
     const currentWs = new WebSocket(bridgeUrl);
     socket = currentWs;
 
@@ -86,7 +145,8 @@ async function connectBridge() {
           isConnected = true;
           authRequired = false;
           authError = null;
-          notifyPopup({ type: 'STATUS_CHANGE', connected: true, authRequired: false });
+          currentProfile = message.profile || storedLabel || detectedEmail || 'Default';
+          notifyPopup({ type: 'STATUS_CHANGE', connected: true, authRequired: false, profile: currentProfile });
           if (reconnectTimer) {
             clearTimeout(reconnectTimer);
             reconnectTimer = null;
@@ -99,7 +159,7 @@ async function connectBridge() {
           isConnected = false;
           authRequired = true;
           authError = message.error;
-          notifyPopup({ type: 'STATUS_CHANGE', connected: false, authRequired: true, authError });
+          notifyPopup({ type: 'STATUS_CHANGE', connected: false, authRequired: true, authError, profile: currentProfile });
           return;
         }
 
@@ -1696,7 +1756,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         isConnected,
         authRequired,
         authError,
-        hasToken: !!token
+        hasToken: !!token,
+        profile: currentProfile
       });
     });
     return true;
@@ -1708,6 +1769,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   } else if (request.type === 'SET_TOKEN') {
     setStoredToken(request.token).then(() => {
       sendResponse({ success: true });
+    });
+    return true;
+  } else if (request.type === 'SET_PROFILE') {
+    setStoredProfileLabel(request.profile).then(() => {
+      sendResponse({ success: true, profile: currentProfile });
     });
     return true;
   } else if (request.type === 'RECONNECT') {

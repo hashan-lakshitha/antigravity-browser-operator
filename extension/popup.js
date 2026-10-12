@@ -3,6 +3,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const statusBadge = document.getElementById('statusBadge');
   const statusText = document.getElementById('statusText');
   const agentStatus = document.getElementById('agentStatus');
+  const activeProfileName = document.getElementById('activeProfileName');
   const activeTabTitle = document.getElementById('activeTabTitle');
   const reconnectBtn = document.getElementById('reconnectBtn');
 
@@ -13,7 +14,12 @@ document.addEventListener('DOMContentLoaded', () => {
   const reloadExtBtn = document.getElementById('reloadExtBtn');
 
   function updateStatus(state = {}) {
-    const { isConnected = false, authRequired = false, authError = null, hasToken = !!tokenInput.value } = state;
+    const { isConnected = false, authRequired = false, authError = null, hasToken = !!tokenInput.value, profile = null } = state;
+
+    if (activeProfileName) {
+      activeProfileName.innerText = profile || 'Default';
+      activeProfileName.title = profile || 'Default Profile';
+    }
 
     if (isConnected) {
       statusBadge.className = 'badge connected';

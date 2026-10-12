@@ -9,6 +9,7 @@ const { CallToolRequestSchema, ListToolsRequestSchema } = require('@modelcontext
 
 const { getOrCreateToken } = require('./auth.js');
 const memory = require('./memory.js');
+const profiles = require('./profiles.js');
 
 const WS_PORT = 8765;
 function getBridgeUrl() {
@@ -180,8 +181,31 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
       {
+        name: 'browser_list_profiles',
+        description: 'Lists all Google Chrome user profiles detected on this computer (e.g. Personal, Work, Clean, Hashan), showing profile folder names ("Default", "Profile 13"), profile display names, emails, whether the Antigravity extension is installed, and real-time WebSocket connection status.',
+        inputSchema: { type: 'object', properties: {} },
+      },
+      {
+        name: 'browser_launch_profile',
+        description: 'Launches a specific Google Chrome user profile window directly by name, folder directory (e.g. "Profile 13", "Default"), or email, optionally navigating to an initial URL. Bypasses the Chrome profile picker dialog entirely.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            profile: {
+              type: 'string',
+              description: 'The profile name (e.g. "Work", "Hashan", "Clean"), folder name ("Profile 13", "Default"), or user email ("hashanwalawwatta@gmail.com").'
+            },
+            url: {
+              type: 'string',
+              description: 'Optional initial URL to open in the newly launched Chrome profile window.'
+            }
+          },
+          required: ['profile'],
+        },
+      },
+      {
         name: 'browser_list_tabs',
-        description: 'Lists all open tabs in the user’s live Chrome browser with tab ID, title, URL, and active status.',
+        description: 'Lists all open tabs across all active Chrome windows and profiles, returning tab ID, title, URL, active status, and profile name.',
         inputSchema: { type: 'object', properties: {} },
       },
       {
@@ -195,10 +219,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'browser_new_tab',
-        description: 'Opens a new tab in the user’s Chrome browser with a specified URL.',
+        description: 'Opens a new tab in the user’s Chrome browser with a specified URL, optionally in a designated profile.',
         inputSchema: {
           type: 'object',
-          properties: { url: { type: 'string', description: 'The URL to open.' } },
+          properties: {
+            url: { type: 'string', description: 'The URL to open.' },
+            profile: { type: 'string', description: 'Optional profile name or folder (e.g. "Work", "Clean") to open this tab in.' }
+          },
           required: ['url'],
         },
       },
@@ -487,6 +514,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   try {
     switch (name) {
+      case 'browser_list_profiles': {
+        const detected = profiles.listProfiles();
+        let connectedProfiles = [];
+        try {
+          const bridgeStatus = await sendAction('get_bridge_status', {}, 1500);
+          if (bridgeStatus && bridgeStatus.profiles) {
+            connectedProfiles = bridgeStatus.profiles;
+          }
+        } catch (e) {}
+
+        const enriched = detected.map(p => {
+          const isConnected = connectedProfiles.some(c =>
+            (c.folder && c.folder.toLowerCase() === p.folder.toLowerCase()) ||
+            (c.email && p.email && c.email.toLowerCase() === p.email.toLowerCase()) ||
+            (c.profile && c.profile.toLowerCase() === p.name.toLowerCase())
+          );
+          return {
+            ...p,
+            isConnected
+          };
+        });
+
+        return { content: [{ type: 'text', text: JSON.stringify(enriched, null, 2) }] };
+      }
+      case 'browser_launch_profile': {
+        const result = profiles.launchProfile(args.profile, args.url);
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      }
       case 'browser_list_tabs': {
         const tabs = await sendAction('list_tabs');
         return { content: [{ type: 'text', text: JSON.stringify(tabs, null, 2) }] };
@@ -496,7 +551,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
       }
       case 'browser_new_tab': {
-        const result = await sendAction('new_tab', { url: args.url });
+        const result = await sendAction('new_tab', { url: args.url, profile: args.profile });
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
       }
       case 'browser_close_tab': {

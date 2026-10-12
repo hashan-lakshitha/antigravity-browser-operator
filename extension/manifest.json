@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Antigravity Browser Operator",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Connects your live Chrome browser to Antigravity AI Agent to perform tasks with your personal accounts.",
   "permissions": [
     "debugger",
@@ -9,7 +9,8 @@
     "activeTab",
     "scripting",
     "storage",
-    "alarms"
+    "alarms",
+    "identity"
   ],
   "host_permissions": [
     "<all_urls>"
