@@ -178,11 +178,219 @@ chrome.tabs.onActivated.addListener(() => {
     connectBridge();
   }
 });
-chrome.tabs.onUpdated.addListener(() => {
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (!socket || socket.readyState !== WebSocket.OPEN) {
     connectBridge();
   }
+  if (changeInfo.status === 'complete') {
+    ensureLoggerInstalled(tabId).catch(() => {});
+  }
 });
+
+// Set-of-Marks (SoM) visual annotation overlay
+async function injectAnnotations(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const old = document.getElementById('__ag_som_overlay__');
+        if (old) old.remove();
+
+        const interactiveSelectors = 'button, a, input, select, textarea, [role="button"], [role="link"], [role="checkbox"], [role="switch"], [role="tab"], [role="menuitem"], label, summary, [onclick]';
+        const candidates = Array.from(document.querySelectorAll(interactiveSelectors));
+
+        const overlay = document.createElement('div');
+        overlay.id = '__ag_som_overlay__';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;pointer-events:none;z-index:2147483647;';
+
+        let counter = 1;
+        for (const el of candidates) {
+          let isVisible = false;
+          if (typeof el.checkVisibility === 'function') {
+            isVisible = el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+          } else {
+            const r = el.getBoundingClientRect();
+            isVisible = (r.width > 0 || r.height > 0) && window.getComputedStyle(el).display !== 'none';
+          }
+          if (!isVisible) continue;
+
+          let ref = el.getAttribute('data-ag-ref');
+          if (!ref) {
+            ref = String(counter++);
+            el.setAttribute('data-ag-ref', ref);
+          }
+
+          const rect = el.getBoundingClientRect();
+          if (rect.bottom <= 0 || rect.top >= window.innerHeight || rect.right <= 0 || rect.left >= window.innerWidth || rect.width <= 0 || rect.height <= 0) {
+            continue;
+          }
+
+          const box = document.createElement('div');
+          box.style.cssText = `
+            position: fixed;
+            left: ${Math.max(0, rect.left)}px;
+            top: ${Math.max(0, rect.top)}px;
+            width: ${Math.min(window.innerWidth - Math.max(0, rect.left), rect.width)}px;
+            height: ${Math.min(window.innerHeight - Math.max(0, rect.top), rect.height)}px;
+            border: 2px solid #ef4444;
+            background: rgba(239, 68, 68, 0.08);
+            box-sizing: border-box;
+            pointer-events: none;
+          `;
+
+          const badge = document.createElement('span');
+          badge.textContent = ref;
+          badge.style.cssText = `
+            position: absolute;
+            top: -12px;
+            left: -2px;
+            background: #ef4444;
+            color: #ffffff;
+            font-size: 11px;
+            font-weight: 700;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            padding: 0 4px;
+            height: 15px;
+            line-height: 15px;
+            border-radius: 3px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.5);
+            white-space: nowrap;
+          `;
+          box.appendChild(badge);
+          overlay.appendChild(box);
+        }
+
+        document.documentElement.appendChild(overlay);
+        return true;
+      }
+    });
+  } catch (e) {
+    console.warn('[Browser Operator] Failed to inject SoM annotations:', e);
+  }
+}
+
+async function removeAnnotations(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const overlay = document.getElementById('__ag_som_overlay__');
+        if (overlay) overlay.remove();
+      }
+    });
+  } catch (e) {}
+}
+
+// In-page logger for console errors & network requests (injected into MAIN world)
+async function ensureLoggerInstalled(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: () => {
+        if (window.__ag_logger_installed) return;
+        window.__ag_logger_installed = true;
+        window.__ag_logs = { console: [], network: [] };
+        const MAX_LOGS = 200;
+
+        const origError = console.error;
+        const origWarn = console.warn;
+        const origLog = console.log;
+        const origInfo = console.info;
+
+        function pushConsole(level, args) {
+          try {
+            const text = Array.from(args).map(a => {
+              if (typeof a === 'string') return a;
+              try { return JSON.stringify(a); } catch (e) { return String(a); }
+            }).join(' ');
+            window.__ag_logs.console.push({
+              level,
+              text: text.slice(0, 1000),
+              time: Date.now()
+            });
+            if (window.__ag_logs.console.length > MAX_LOGS) window.__ag_logs.console.shift();
+          } catch (e) {}
+        }
+
+        console.error = function(...args) { pushConsole('error', args); return origError.apply(console, args); };
+        console.warn = function(...args) { pushConsole('warn', args); return origWarn.apply(console, args); };
+        console.log = function(...args) { pushConsole('log', args); return origLog.apply(console, args); };
+        console.info = function(...args) { pushConsole('info', args); return origInfo.apply(console, args); };
+
+        window.addEventListener('error', (event) => {
+          pushConsole('error', [`[Uncaught Error] ${event.message} at ${event.filename || ''}:${event.lineno || ''}`]);
+        });
+        window.addEventListener('unhandledrejection', (event) => {
+          pushConsole('error', [`[Unhandled Promise Rejection] ${event.reason}`]);
+        });
+
+        // Intercept Fetch
+        const origFetch = window.fetch;
+        window.fetch = async function(...args) {
+          const startTime = Date.now();
+          const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || 'unknown');
+          const method = (args[1]?.method || 'GET').toUpperCase();
+          try {
+            const response = await origFetch.apply(this, args);
+            window.__ag_logs.network.push({
+              type: 'fetch',
+              method,
+              url,
+              status: response.status,
+              statusText: response.statusText,
+              ok: response.ok,
+              durationMs: Date.now() - startTime,
+              time: startTime
+            });
+            if (window.__ag_logs.network.length > MAX_LOGS) window.__ag_logs.network.shift();
+            return response;
+          } catch (err) {
+            window.__ag_logs.network.push({
+              type: 'fetch',
+              method,
+              url,
+              status: 0,
+              statusText: 'Network Error',
+              ok: false,
+              error: err.message,
+              durationMs: Date.now() - startTime,
+              time: startTime
+            });
+            if (window.__ag_logs.network.length > MAX_LOGS) window.__ag_logs.network.shift();
+            throw err;
+          }
+        };
+
+        // Intercept XMLHttpRequest
+        const origOpen = XMLHttpRequest.prototype.open;
+        const origSend = XMLHttpRequest.prototype.send;
+        XMLHttpRequest.prototype.open = function(method, url) {
+          this.__ag_req = { method: (method || 'GET').toUpperCase(), url, startTime: Date.now() };
+          return origOpen.apply(this, arguments);
+        };
+        XMLHttpRequest.prototype.send = function() {
+          if (this.__ag_req) {
+            this.addEventListener('loadend', () => {
+              window.__ag_logs.network.push({
+                type: 'xhr',
+                method: this.__ag_req.method,
+                url: this.__ag_req.url,
+                status: this.status,
+                statusText: this.statusText,
+                ok: this.status >= 200 && this.status < 300,
+                durationMs: Date.now() - this.__ag_req.startTime,
+                time: this.__ag_req.startTime
+              });
+              if (window.__ag_logs.network.length > MAX_LOGS) window.__ag_logs.network.shift();
+            });
+          }
+          return origSend.apply(this, arguments);
+        };
+      }
+    });
+  } catch (e) {}
+}
 
 // Notify popup UI if open
 function notifyPopup(msg) {
@@ -262,6 +470,8 @@ async function handleAction(action, params = {}) {
           const ms = item.ms || item.time || 500;
           await new Promise(r => setTimeout(r, Math.min(ms, 15000)));
           actRes = { success: true, waitedMs: ms };
+        } else if (actionType === 'wait_for') {
+          actRes = await handleAction('wait_for', { ...item, tabId });
         } else if (actionType === 'click') {
           actRes = await handleAction('click', { ...item, tabId });
         } else if (actionType === 'type') {
@@ -391,48 +601,58 @@ async function handleAction(action, params = {}) {
       const imgFormat = params.format === 'png' ? 'png' : 'jpeg';
       const imgQuality = typeof params.quality === 'number' ? params.quality : 80;
 
-      // 1. Try CDP Page.captureScreenshot first (fast, works even if window is behind or unfocused)
-      if (targetTabId) {
-        try {
-          try { await chrome.debugger.detach({ tabId: targetTabId }); } catch (e) {}
-          await chrome.debugger.attach({ tabId: targetTabId }, '1.3');
-          try {
-            await chrome.debugger.sendCommand({ tabId: targetTabId }, 'Page.enable', {});
-            const cdpOpts = { format: imgFormat };
-            if (imgFormat === 'jpeg') cdpOpts.quality = imgQuality;
-            const res = await chrome.debugger.sendCommand({ tabId: targetTabId }, 'Page.captureScreenshot', cdpOpts);
-            if (res && res.data) {
-              return { success: true, dataUrl: `data:image/${imgFormat};base64,` + res.data, format: imgFormat };
-            }
-          } finally {
-            try { await chrome.debugger.detach({ tabId: targetTabId }); } catch (e) {}
-          }
-        } catch (dbgErr) {
-          console.warn('[Browser Operator] CDP screenshot failed, falling back to captureVisibleTab:', dbgErr);
-        }
+      if (params.annotate && targetTabId) {
+        await injectAnnotations(targetTabId);
       }
 
-      // 2. Fallback: captureVisibleTab with timeout
-      if (windowId) {
-        try {
-          const win = await chrome.windows.get(windowId);
-          if (win.state === 'minimized') {
-            await chrome.windows.update(windowId, { state: 'normal', focused: true });
-            await new Promise(r => setTimeout(r, 400));
+      try {
+        // 1. Try CDP Page.captureScreenshot first (fast, works even if window is behind or unfocused)
+        if (targetTabId) {
+          try {
+            try { await chrome.debugger.detach({ tabId: targetTabId }); } catch (e) {}
+            await chrome.debugger.attach({ tabId: targetTabId }, '1.3');
+            try {
+              await chrome.debugger.sendCommand({ tabId: targetTabId }, 'Page.enable', {});
+              const cdpOpts = { format: imgFormat };
+              if (imgFormat === 'jpeg') cdpOpts.quality = imgQuality;
+              const res = await chrome.debugger.sendCommand({ tabId: targetTabId }, 'Page.captureScreenshot', cdpOpts);
+              if (res && res.data) {
+                return { success: true, dataUrl: `data:image/${imgFormat};base64,` + res.data, format: imgFormat };
+              }
+            } finally {
+              try { await chrome.debugger.detach({ tabId: targetTabId }); } catch (e) {}
+            }
+          } catch (dbgErr) {
+            console.warn('[Browser Operator] CDP screenshot failed, falling back to captureVisibleTab:', dbgErr);
           }
-        } catch (e) {}
-      }
-      const captureOpts = { format: imgFormat };
-      if (imgFormat === 'jpeg') captureOpts.quality = imgQuality;
-      const dataUrl = await new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error('captureVisibleTab timed out')), 3000);
-        chrome.tabs.captureVisibleTab(windowId, captureOpts, (res) => {
-          clearTimeout(timer);
-          if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-          else resolve(res);
+        }
+
+        // 2. Fallback: captureVisibleTab with timeout
+        if (windowId) {
+          try {
+            const win = await chrome.windows.get(windowId);
+            if (win.state === 'minimized') {
+              await chrome.windows.update(windowId, { state: 'normal', focused: true });
+              await new Promise(r => setTimeout(r, 400));
+            }
+          } catch (e) {}
+        }
+        const captureOpts = { format: imgFormat };
+        if (imgFormat === 'jpeg') captureOpts.quality = imgQuality;
+        const dataUrl = await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('captureVisibleTab timed out')), 3000);
+          chrome.tabs.captureVisibleTab(windowId, captureOpts, (res) => {
+            clearTimeout(timer);
+            if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+            else resolve(res);
+          });
         });
-      });
-      return { success: true, dataUrl, format: imgFormat };
+        return { success: true, dataUrl, format: imgFormat };
+      } finally {
+        if (params.annotate && targetTabId) {
+          await removeAnnotations(targetTabId);
+        }
+      }
     }
 
     case 'handle_dialog': {
@@ -1198,6 +1418,264 @@ async function handleAction(action, params = {}) {
         });
         return injectionResults[0]?.result || {};
       }
+    }
+
+    case 'wait_for': {
+      let tabId = params.tabId ? parseInt(params.tabId, 10) : null;
+      if (!tabId) {
+        const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+        tabId = active?.id;
+      }
+      if (!tabId) throw new Error('No active tab found');
+
+      const state = params.state || 'visible';
+      const timeoutMs = Math.min(Math.max(params.timeout || 10000, 500), 30000);
+      const startTime = Date.now();
+
+      if (state === 'network_idle') {
+        let reachedIdle = false;
+        try {
+          try { await chrome.debugger.detach({ tabId }); } catch (e) {}
+          await chrome.debugger.attach({ tabId }, '1.3');
+          try {
+            await chrome.debugger.sendCommand({ tabId }, 'Network.enable', {});
+            let inFlight = 0;
+            let idleTimer = null;
+
+            const onNetworkEvent = (source, method) => {
+              if (source.tabId !== tabId) return;
+              if (method === 'Network.requestWillBeSent') {
+                inFlight++;
+                if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+              } else if (method === 'Network.loadingFinished' || method === 'Network.loadingFailed') {
+                inFlight = Math.max(0, inFlight - 1);
+                if (inFlight === 0 && !idleTimer) {
+                  idleTimer = setTimeout(() => { reachedIdle = true; }, 500);
+                }
+              }
+            };
+
+            chrome.debugger.onEvent.addListener(onNetworkEvent);
+            idleTimer = setTimeout(() => { reachedIdle = true; }, 500);
+
+            try {
+              while (Date.now() - startTime < timeoutMs) {
+                if (reachedIdle) break;
+                await new Promise(r => setTimeout(r, 100));
+              }
+            } finally {
+              if (idleTimer) clearTimeout(idleTimer);
+              chrome.debugger.onEvent.removeListener(onNetworkEvent);
+            }
+          } finally {
+            try { await chrome.debugger.detach({ tabId }); } catch (e) {}
+          }
+        } catch (dbgErr) {
+          console.warn('[Browser Operator] CDP network_idle failed, falling back to script polling:', dbgErr);
+          let lastCount = -1;
+          let stableCount = 0;
+          while (Date.now() - startTime < timeoutMs) {
+            const [res] = await chrome.scripting.executeScript({
+              target: { tabId },
+              func: () => ({
+                readyState: document.readyState,
+                resCount: typeof performance !== 'undefined' ? performance.getEntriesByType('resource').length : 0
+              })
+            });
+            if (res?.result?.readyState === 'complete') {
+              if (res.result.resCount === lastCount) {
+                stableCount++;
+                if (stableCount >= 3) { reachedIdle = true; break; }
+              } else {
+                lastCount = res.result.resCount;
+                stableCount = 0;
+              }
+            }
+            await new Promise(r => setTimeout(r, 200));
+          }
+        }
+
+        return {
+          success: true,
+          state: 'network_idle',
+          reachedIdle,
+          waitedMs: Date.now() - startTime
+        };
+      }
+
+      // Waiting for element: selector, text, or ref
+      const injectionResults = await chrome.scripting.executeScript({
+        target: { tabId },
+        args: [
+          params.selector || null,
+          params.text || null,
+          params.ref || null,
+          state,
+          timeoutMs
+        ],
+        func: async (selector, text, ref, targetState, maxWait) => {
+          const t0 = Date.now();
+          function findTarget() {
+            let el = null;
+            if (ref) el = document.querySelector(`[data-ag-ref="${ref}"]`);
+            if (!el && selector) el = document.querySelector(selector);
+            if (!el && text) {
+              const lower = text.toLowerCase().trim();
+              const all = Array.from(document.querySelectorAll('body *:not(script):not(style):not(noscript)'));
+              el = all.find(e => {
+                const t = (e.innerText || e.value || e.getAttribute('aria-label') || '').toLowerCase();
+                return t === lower || t.includes(lower);
+              });
+            }
+            return el;
+          }
+
+          function checkCondition(el) {
+            if (targetState === 'hidden') {
+              if (!el) return true;
+              if (typeof el.checkVisibility === 'function') {
+                return !el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+              }
+              const r = el.getBoundingClientRect();
+              return r.width === 0 || r.height === 0 || window.getComputedStyle(el).display === 'none';
+            }
+
+            if (!el) return false;
+            let isVisible = false;
+            if (typeof el.checkVisibility === 'function') {
+              isVisible = el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+            } else {
+              const r = el.getBoundingClientRect();
+              isVisible = (r.width > 0 || r.height > 0) && window.getComputedStyle(el).display !== 'none';
+            }
+            if (!isVisible) return false;
+
+            if (targetState === 'clickable') {
+              const disabled = el.hasAttribute('disabled') || el.getAttribute('aria-disabled') === 'true';
+              return !disabled;
+            }
+            return true; // visible
+          }
+
+          while (Date.now() - t0 < maxWait) {
+            const el = findTarget();
+            if (checkCondition(el)) {
+              return {
+                found: true,
+                waitedMs: Date.now() - t0,
+                tag: el ? el.tagName.toLowerCase() : undefined,
+                text: el ? (el.innerText || el.value || '').slice(0, 80) : undefined
+              };
+            }
+            await new Promise(r => setTimeout(r, 100));
+          }
+
+          return {
+            found: false,
+            waitedMs: Date.now() - t0,
+            error: `Timeout (${maxWait}ms) reached waiting for element condition "${targetState}"`
+          };
+        }
+      });
+
+      const res = injectionResults[0]?.result || {};
+      if (!res.found && state !== 'hidden') {
+        return { success: false, error: res.error || 'Timeout waiting for element', waitedMs: res.waitedMs };
+      }
+      return { success: true, ...res };
+    }
+
+    case 'get_console_logs': {
+      let tabId = params.tabId ? parseInt(params.tabId, 10) : null;
+      if (!tabId) {
+        const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+        tabId = active?.id;
+      }
+      if (!tabId) throw new Error('No active tab found');
+
+      await ensureLoggerInstalled(tabId);
+      const filterTypes = Array.isArray(params.types) ? params.types : null;
+      const doClear = Boolean(params.clear);
+
+      const [res] = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        args: [filterTypes, doClear],
+        func: (types, clear) => {
+          let logs = window.__ag_logs?.console || [];
+          if (types && types.length > 0) {
+            logs = logs.filter(l => types.includes(l.level));
+          }
+          const errors = logs.filter(l => l.level === 'error');
+          const warnings = logs.filter(l => l.level === 'warn');
+          const out = {
+            totalCount: logs.length,
+            errorCount: errors.length,
+            warningCount: warnings.length,
+            logs: logs.slice(-100)
+          };
+          if (clear && window.__ag_logs) {
+            window.__ag_logs.console = [];
+          }
+          return out;
+        }
+      });
+
+      return { success: true, tabId, ...(res?.result || {}) };
+    }
+
+    case 'get_network_logs': {
+      let tabId = params.tabId ? parseInt(params.tabId, 10) : null;
+      if (!tabId) {
+        const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+        tabId = active?.id;
+      }
+      if (!tabId) throw new Error('No active tab found');
+
+      await ensureLoggerInstalled(tabId);
+      const failedOnly = Boolean(params.failedOnly);
+      const limit = typeof params.limit === 'number' ? params.limit : 50;
+      const doClear = Boolean(params.clear);
+
+      const [res] = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        args: [failedOnly, limit, doClear],
+        func: (onlyFailed, maxLimit, clear) => {
+          let reqs = window.__ag_logs?.network || [];
+          if (reqs.length === 0 && typeof performance !== 'undefined') {
+            const perf = performance.getEntriesByType('resource');
+            reqs = perf.slice(-maxLimit).map(p => ({
+              type: p.initiatorType || 'resource',
+              method: 'GET',
+              url: p.name,
+              status: 200,
+              ok: true,
+              durationMs: Math.round(p.duration),
+              time: Math.round(p.startTime)
+            }));
+          }
+
+          if (onlyFailed) {
+            reqs = reqs.filter(r => !r.ok || r.status >= 400 || r.status === 0);
+          }
+
+          const failed = reqs.filter(r => !r.ok || r.status >= 400 || r.status === 0);
+          const out = {
+            totalCount: reqs.length,
+            failedCount: failed.length,
+            requests: reqs.slice(-maxLimit),
+            failedRequests: failed.slice(-maxLimit)
+          };
+
+          if (clear && window.__ag_logs) {
+            window.__ag_logs.network = [];
+          }
+          return out;
+        }
+      });
+
+      return { success: true, tabId, ...(res?.result || {}) };
     }
 
     case 'reload_extension': {

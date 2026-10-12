@@ -16,6 +16,43 @@ function getBridgeUrl() {
   return `ws://127.0.0.1:${WS_PORT}/mcp?token=${encodeURIComponent(token)}`;
 }
 
+const DEFAULT_MAX_SCREENSHOTS = 20; // Keep at most the 20 most recent screenshots
+const MAX_SCREENSHOT_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+// Automatically prune older screenshots to prevent disk bloat
+function cleanupScreenshots(screenshotsDir, maxKeep = DEFAULT_MAX_SCREENSHOTS, maxAgeMs = MAX_SCREENSHOT_AGE_MS) {
+  try {
+    if (!fs.existsSync(screenshotsDir)) return;
+    const now = Date.now();
+    const files = fs.readdirSync(screenshotsDir)
+      .filter((file) => /^screenshot_.*\.(png|jpg|jpeg)$/i.test(file))
+      .map((file) => {
+        const fullPath = path.join(screenshotsDir, file);
+        try {
+          const stats = fs.statSync(fullPath);
+          return { path: fullPath, mtime: stats.mtimeMs };
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.mtime - a.mtime); // newest first
+
+    for (let i = 0; i < files.length; i++) {
+      const isExcess = i >= maxKeep;
+      const isExpired = (now - files[i].mtime) > maxAgeMs;
+      // Retain the top 5 newest regardless of age; prune if over retention count or expired
+      if (isExcess || (isExpired && i >= 5)) {
+        try {
+          fs.unlinkSync(files[i].path);
+        } catch {}
+      }
+    }
+  } catch (err) {
+    console.error('[MCP Server] Auto-cleanup screenshots failed:', err.message);
+  }
+}
+
 let bridgeWs = null;
 let messageId = 1;
 const pendingRequests = new Map();
@@ -293,7 +330,56 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             savePath: { type: 'string', description: 'Optional file path to save the image. If omitted, saves to project screenshots folder.' },
             format: { type: 'string', enum: ['jpeg', 'png'], description: 'Image format (defaults to "jpeg" for fast lightweight transfer).' },
             quality: { type: 'number', description: 'Compression quality 1-100 (defaults to 80 for jpeg).' },
+            annotate: { type: 'boolean', description: 'When true, paints visual Set-of-Marks (SoM) numbered badges matching element refs directly onto the screenshot before capturing, perfect for multimodal visual reasoning.' },
             tabId: { type: 'number', description: 'Optional tab ID.' },
+          },
+        },
+      },
+      {
+        name: 'browser_wait_for',
+        description: 'Waits for an element to appear, become visible, clickable, hidden, or waits for network idle (pending API requests to finish).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            selector: { type: 'string', description: 'CSS selector of the element to wait for.' },
+            text: { type: 'string', description: 'Visible text content of the element to wait for.' },
+            ref: { type: 'string', description: 'Indexed reference ID of the element to wait for.' },
+            state: {
+              type: 'string',
+              enum: ['visible', 'clickable', 'hidden', 'network_idle'],
+              description: 'Condition state to wait for (default: "visible"). Use "network_idle" to wait until background API/fetch requests settle.'
+            },
+            timeout: { type: 'number', description: 'Maximum milliseconds to wait (default: 10000ms).' },
+            tabId: { type: 'number', description: 'Optional tab ID.' },
+          },
+        },
+      },
+      {
+        name: 'browser_get_console_logs',
+        description: 'Retrieves recent console logs, warnings, runtime errors, and unhandled promise rejections from the page.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            tabId: { type: 'number', description: 'Optional tab ID.' },
+            types: {
+              type: 'array',
+              items: { type: 'string', enum: ['error', 'warn', 'info', 'log'] },
+              description: 'Filter logs by type (default: returns all types).'
+            },
+            clear: { type: 'boolean', description: 'Whether to clear the console log buffer after reading (default: false).' },
+          },
+        },
+      },
+      {
+        name: 'browser_get_network_logs',
+        description: 'Retrieves recent network activity (Fetch, XHR, resource requests, status codes, failed requests, and response times).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            tabId: { type: 'number', description: 'Optional tab ID.' },
+            failedOnly: { type: 'boolean', description: 'When true, returns only failed HTTP requests (status 4xx, 5xx, or network errors).' },
+            limit: { type: 'number', description: 'Maximum number of requests to return (default: 50).' },
+            clear: { type: 'boolean', description: 'Whether to clear the network log buffer after reading (default: false).' },
           },
         },
       },
@@ -472,7 +558,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const result = await sendAction('screenshot', {
           tabId: args.tabId,
           format: args.format || 'jpeg',
-          quality: args.quality || 80
+          quality: args.quality || 80,
+          annotate: Boolean(args.annotate)
         });
         let savedPath = null;
         if (result && result.dataUrl) {
@@ -491,6 +578,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               fs.mkdirSync(targetDir, { recursive: true });
             }
             fs.writeFileSync(savedPath, buffer);
+            cleanupScreenshots(screenshotsDir);
           } catch (fsErr) {
             console.error('[MCP Server] Failed to save screenshot to disk:', fsErr.message);
           }
@@ -507,6 +595,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }, null, 2)
           }]
         };
+      }
+      case 'browser_wait_for': {
+        const result = await sendAction('wait_for', {
+          selector: args.selector,
+          text: args.text,
+          ref: args.ref,
+          state: args.state || 'visible',
+          timeout: args.timeout,
+          tabId: args.tabId
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      }
+      case 'browser_get_console_logs': {
+        const result = await sendAction('get_console_logs', {
+          tabId: args.tabId,
+          types: args.types,
+          clear: args.clear
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      }
+      case 'browser_get_network_logs': {
+        const result = await sendAction('get_network_logs', {
+          tabId: args.tabId,
+          failedOnly: args.failedOnly,
+          limit: args.limit,
+          clear: args.clear
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       }
       case 'browser_evaluate': {
         const result = await sendAction('evaluate', { script: args.script, tabId: args.tabId });
@@ -590,6 +706,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 // Start MCP Server
 async function main() {
   await connectToBridge(true);
+  cleanupScreenshots(path.resolve(__dirname, '..', 'screenshots'));
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error('[Antigravity Browser Operator] MCP Server connected via stdio');
