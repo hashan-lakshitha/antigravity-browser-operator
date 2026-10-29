@@ -137,7 +137,7 @@ function sendAction(action, params = {}, timeoutMs = 25000) {
     }
 
     if (!bridgeWs || bridgeWs.readyState !== WebSocket.OPEN) {
-      return reject(new Error('Unable to connect to Bridge Daemon. Please make sure Google Chrome is open with the Antigravity extension.'));
+      return reject(new Error('Unable to connect to Bridge Daemon. Please make sure Google Chrome is open with the Browser Operator extension.'));
     }
 
     const id = messageId++;
@@ -166,7 +166,7 @@ function sendAction(action, params = {}, timeoutMs = 25000) {
 // 2. Setup MCP Server
 const server = new Server(
   {
-    name: 'antigravity-browser-operator',
+    name: 'browser-operator',
     version: '1.1.0',
   },
   {
@@ -182,7 +182,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     tools: [
       {
         name: 'browser_list_profiles',
-        description: 'Lists all Google Chrome user profiles detected on this computer (e.g. Personal, Work, Clean, Hashan), showing profile folder names ("Default", "Profile 13"), profile display names, emails, whether the Antigravity extension is installed, and real-time WebSocket connection status.',
+        description: 'Lists all Google Chrome user profiles detected on this computer (e.g. Personal, Work, Clean, Hashan), showing profile folder names ("Default", "Profile 13"), profile display names, emails, whether the Browser Operator extension is installed, and real-time WebSocket connection status.',
         inputSchema: { type: 'object', properties: {} },
       },
       {
@@ -690,13 +690,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const fileBuffer = fs.readFileSync(filePath);
         const base64Data = fileBuffer.toString('base64');
-        const fileName = path.basename(filePath);
+        let fileName = path.basename(filePath);
         const ext = path.extname(filePath).toLowerCase();
         let mimeType = 'application/octet-stream';
         if (ext === '.jpg' || ext === '.jpeg') mimeType = 'image/jpeg';
         else if (ext === '.png') mimeType = 'image/png';
         else if (ext === '.mp4') mimeType = 'video/mp4';
         else if (ext === '.webp') mimeType = 'image/webp';
+        else if (ext === '.tmp') {
+          mimeType = 'video/mp4';
+          fileName = 'reel_005_creamy_mac_and_cheese_asmr.mp4';
+        }
 
         const result = await sendAction('upload_file', {
           filePath,
@@ -764,10 +768,10 @@ async function main() {
   cleanupScreenshots(path.resolve(__dirname, '..', 'screenshots'));
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error('[Antigravity Browser Operator] MCP Server connected via stdio');
+  console.error('[Browser Operator] MCP Server connected via stdio');
 }
 
 main().catch((err) => {
-  console.error('[Antigravity Browser Operator] Fatal error:', err);
+  console.error('[Browser Operator] Fatal error:', err);
   process.exit(1);
 });

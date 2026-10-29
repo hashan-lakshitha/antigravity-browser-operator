@@ -3,18 +3,18 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 
-const TOKEN_DIR = path.join(os.homedir(), '.antigravity-browser-operator');
+const TOKEN_DIR = path.join(os.homedir(), '.browser-operator');
 const TOKEN_FILE = path.join(TOKEN_DIR, 'token');
 
 /**
  * Retrieves the existing security token or generates a new cryptographically secure one.
  * Priority:
- * 1. process.env.ANTIGRAVITY_AUTH_TOKEN
- * 2. ~/.antigravity-browser-operator/token
+ * 1. process.env.BROWSER_OPERATOR_AUTH_TOKEN
+ * 2. ~/.browser-operator/token
  */
 function getOrCreateToken() {
-  if (process.env.ANTIGRAVITY_AUTH_TOKEN && process.env.ANTIGRAVITY_AUTH_TOKEN.trim()) {
-    return process.env.ANTIGRAVITY_AUTH_TOKEN.trim();
+  if (process.env.BROWSER_OPERATOR_AUTH_TOKEN && process.env.BROWSER_OPERATOR_AUTH_TOKEN.trim()) {
+    return process.env.BROWSER_OPERATOR_AUTH_TOKEN.trim();
   }
 
   try {

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Antigravity Browser Operator",
+  "name": "Browser Operator",
   "version": "1.4.0",
-  "description": "Connects your live Chrome browser to Antigravity AI Agent to perform tasks with your personal accounts.",
+  "description": "Connects your live Chrome browser to AI Agents and MCP clients to perform tasks with your personal accounts.",
   "permissions": [
     "debugger",
     "tabs",
@@ -21,7 +21,7 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Antigravity Browser Operator",
+    "default_title": "Browser Operator",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png",

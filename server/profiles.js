@@ -32,7 +32,7 @@ function checkProfileHasExtension(folder) {
     for (const p of [securePrefs, prefs]) {
       if (fs.existsSync(p)) {
         const content = fs.readFileSync(p, 'utf8');
-        if (content.includes('antigravity-browser-operator') || content.includes('Antigravity Browser Operator')) {
+        if (content.includes('browser-operator') || content.includes('Browser Operator')) {
           return true;
         }
       }
@@ -102,7 +102,7 @@ function launchProfile(profileNameOrFolder, url) {
       hasExtension: target.hasExtension
     },
     url: url || undefined,
-    message: `Launched Chrome profile "${target.name}" (${target.folder})${url ? ` with URL: ${url}` : ''}.${!target.hasExtension ? ' Note: The Antigravity extension is not yet loaded in this profile. To automate tabs here, load the extension once via chrome://extensions.' : ''}`
+    message: `Launched Chrome profile "${target.name}" (${target.folder})${url ? ` with URL: ${url}` : ''}.${!target.hasExtension ? ' Note: The Browser Operator extension is not yet loaded in this profile. To automate tabs here, load the extension once via chrome://extensions.' : ''}`
   };
 }
 

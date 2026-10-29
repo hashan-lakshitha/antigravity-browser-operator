@@ -1,4 +1,4 @@
-// Antigravity Browser Operator - Autonomous Memory & Self-Learning Engine
+// Browser Operator - Autonomous Memory & Self-Learning Engine
 const fs = require('fs');
 const path = require('path');
 

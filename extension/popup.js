@@ -1,4 +1,4 @@
-// Antigravity Browser Operator - Popup Controller
+// Browser Operator - Popup Controller
 document.addEventListener('DOMContentLoaded', () => {
   const statusBadge = document.getElementById('statusBadge');
   const statusText = document.getElementById('statusText');
@@ -46,9 +46,9 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // Load stored token directly from chrome.storage
-  chrome.storage.local.get(['antigravity_token'], (res) => {
-    if (res && res.antigravity_token) {
-      tokenInput.value = res.antigravity_token;
+  chrome.storage.local.get(['browser_operator_token'], (res) => {
+    if (res && res.browser_operator_token) {
+      tokenInput.value = res.browser_operator_token;
     }
     // Query background status
     chrome.runtime.sendMessage({ type: 'GET_STATUS' }, (statusRes) => {
@@ -84,7 +84,7 @@ document.addEventListener('DOMContentLoaded', () => {
     saveTokenBtn.disabled = true;
 
     try {
-      await chrome.storage.local.set({ antigravity_token: rawVal });
+      await chrome.storage.local.set({ browser_operator_token: rawVal });
       chrome.runtime.sendMessage({ type: 'SET_TOKEN', token: rawVal }, () => {});
 
       saveTokenBtn.innerText = 'Saved!';

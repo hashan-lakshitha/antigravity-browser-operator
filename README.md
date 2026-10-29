@@ -1,8 +1,8 @@
-# Antigravity Browser Operator ⚡
+# Browser Operator ⚡
 
-> Connects your live Google Chrome browser directly to Antigravity AI Agent (and other MCP clients) without restarting Chrome, bypassing the need for guest profiles or remote debugging flags.
+> Connects your live Google Chrome browser directly to AI Agents and MCP clients without restarting Chrome, bypassing the need for guest profiles or remote debugging flags.
 
-Built with **Manifest V3 Chrome Extension** (`chrome.tabs`, `chrome.scripting`, `chrome.debugger`) and a local **Model Context Protocol (MCP) Server** communicating over an authenticated local WebSocket bridge (`ws://127.0.0.1:8765`).
+Built with a **Manifest V3 Chrome Extension** (`chrome.tabs`, `chrome.scripting`, `chrome.debugger`) and a local **Model Context Protocol (MCP) Server** communicating over an authenticated local WebSocket bridge (`ws://127.0.0.1:8765`).
 
 ---
 
@@ -10,7 +10,7 @@ Built with **Manifest V3 Chrome Extension** (`chrome.tabs`, `chrome.scripting`, 
 
 ```mermaid
 graph LR
-  A["Antigravity AI Agent"] -->|MCP stdio| B["Local MCP Server (Node.js)"]
+  A["AI Agent / MCP Client"] -->|MCP stdio| B["Local MCP Server (Node.js)"]
   B <-->|Authenticated WS ws://127.0.0.1:8765| C["Chrome Extension (Manifest V3)"]
   C <-->|chrome.tabs & scripting API| D["Your Live Chrome (Any Website / Web App)"]
 ```
@@ -30,7 +30,7 @@ To protect your browser against unauthorized local access and malicious websites
 
 1. **Cryptographic Token Authentication (Shared Secret)**:
    - All connections to the local WebSocket bridge require a 256-bit entropy token.
-   - Automatically generated and securely stored at `~/.antigravity-browser-operator/token`.
+   - Automatically generated and securely stored at `~/.browser-operator/token`.
    - Unauthenticated or invalid connections are dropped immediately (`4001 Unauthorized`).
    - Run `npm run token` to view your security token.
 
@@ -49,17 +49,17 @@ To protect your browser against unauthorized local access and malicious websites
 3. Click **Load unpacked** (top left).
 4. Select the `extension` folder from this project:
    ```
-   C:\Users\r123t\Documents\www\antigravity-browser-operator\extension
+   C:\Users\r123t\Documents\www\browser-operator\extension
    ```
-5. You'll see the **⚡ Antigravity Browser Operator** icon appear in your Chrome toolbar.
+5. You'll see the **⚡ Browser Operator** icon appear in your Chrome toolbar.
 
 ### 2. Pair with Security Token:
 1. Get your security token by running:
    ```bash
    npm run token
    ```
-   *(or copy it from `~/.antigravity-browser-operator/token`)*
-2. Click the **Antigravity Browser Operator** icon in Chrome.
+   *(or copy it from `~/.browser-operator/token`)*
+2. Click the **Browser Operator** icon in Chrome.
 3. Paste the token into the **Security Token** field and click **Save Token**.
 4. The status badge will turn green: **Connected** and **Authenticated**.
 
@@ -69,6 +69,8 @@ To protect your browser against unauthorized local access and malicious websites
 
 | Tool Name | Description |
 |-----------|-------------|
+| `browser_list_profiles` | Lists all Google Chrome user profiles detected on this computer, showing folder names, emails, extension status, and real-time connection state. |
+| `browser_launch_profile` | Launches a specific Google Chrome user profile window directly by name, folder, or email. |
 | `browser_list_tabs` | Returns all open tabs across your Chrome windows (ID, title, URL, active state). |
 | `browser_select_tab` | Focuses / switches to a specific tab by ID. |
 | `browser_navigate` | Navigates the current tab to any URL and waits for page load. |
@@ -77,13 +79,12 @@ To protect your browser against unauthorized local access and malicious websites
 | `browser_type` | Types into input / text fields by `ref` or CSS selector with optional Enter keypress. |
 | `browser_select_option` | Selects an option from a `<select>` dropdown or custom listbox by `ref` or selector with `value` or `text`. |
 | `browser_set_checked` | Sets the checked state (`true`/`false`) of a checkbox, radio, or toggle switch by `ref` or selector. |
-| `browser_screenshot` | Captures visible screenshot of any tab and saves as a PNG image to disk. |
+| `browser_screenshot` | Captures visible screenshot of any tab and saves as a PNG/JPEG image to disk (supports Set-of-Marks `annotate: true`). |
 | `browser_scroll` | Scrolls tab up or down smoothly. |
 | `browser_evaluate` | Executes arbitrary JavaScript inside the page context. |
 | `browser_upload_file` | Uploads local files to file inputs autonomously via Chrome DevTools Protocol & DataTransfer without opening OS file picker. |
 | `browser_new_tab` | Opens a new tab with a given URL. |
 | `browser_close_tab` | Closes any specific tab. |
-
 
 ---
 

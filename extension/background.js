@@ -1,4 +1,4 @@
-// Antigravity Browser Operator - Background Service Worker
+// Browser Operator - Background Service Worker
 const WS_URL = 'ws://127.0.0.1:8765';
 let socket = null;
 let isConnected = false;
@@ -7,15 +7,15 @@ let authError = null;
 let reconnectTimer = null;
 let isConnecting = false;
 
-console.log('[Antigravity] Background service worker initialized');
+console.log('[BrowserOperator] Background service worker initialized');
 
 let currentProfile = null;
 
 // Storage helper functions for security token & profile
 async function getStoredToken() {
   try {
-    const data = await chrome.storage.local.get(['antigravity_token']);
-    return data.antigravity_token ? data.antigravity_token.trim() : null;
+    const data = await chrome.storage.local.get(['browser_operator_token']);
+    return data.browser_operator_token ? data.browser_operator_token.trim() : null;
   } catch (e) {
     return null;
   }
@@ -23,8 +23,8 @@ async function getStoredToken() {
 
 async function getStoredProfileLabel() {
   try {
-    const data = await chrome.storage.local.get(['antigravity_profile_label']);
-    return data.antigravity_profile_label ? data.antigravity_profile_label.trim() : null;
+    const data = await chrome.storage.local.get(['browser_operator_profile_label']);
+    return data.browser_operator_profile_label ? data.browser_operator_profile_label.trim() : null;
   } catch (e) {
     return null;
   }
@@ -52,9 +52,9 @@ async function getProfileIdentity() {
 async function setStoredToken(token) {
   try {
     if (token && token.trim()) {
-      await chrome.storage.local.set({ antigravity_token: token.trim() });
+      await chrome.storage.local.set({ browser_operator_token: token.trim() });
     } else {
-      await chrome.storage.local.remove('antigravity_token');
+      await chrome.storage.local.remove('browser_operator_token');
     }
     authRequired = false;
     authError = null;
@@ -71,16 +71,16 @@ async function setStoredToken(token) {
     }
     connectBridge();
   } catch (e) {
-    console.error('[Antigravity] Failed to save token:', e);
+    console.error('[BrowserOperator] Failed to save token:', e);
   }
 }
 
 async function setStoredProfileLabel(label) {
   try {
     if (label && label.trim()) {
-      await chrome.storage.local.set({ antigravity_profile_label: label.trim() });
+      await chrome.storage.local.set({ browser_operator_profile_label: label.trim() });
     } else {
-      await chrome.storage.local.remove('antigravity_profile_label');
+      await chrome.storage.local.remove('browser_operator_profile_label');
     }
     currentProfile = label ? label.trim() : null;
     if (socket && socket.readyState === WebSocket.OPEN) {
@@ -91,11 +91,11 @@ async function setStoredProfileLabel(label) {
     }
     notifyPopup({ type: 'STATUS_CHANGE', connected: isConnected, profile: currentProfile });
   } catch (e) {
-    console.error('[Antigravity] Failed to save profile label:', e);
+    console.error('[BrowserOperator] Failed to save profile label:', e);
   }
 }
 
-// Connect to local Antigravity MCP Bridge
+// Connect to local Browser Operator MCP Bridge
 async function connectBridge() {
   if (isConnecting) return;
   if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
@@ -111,7 +111,7 @@ async function connectBridge() {
     ]);
 
     if (!token) {
-      console.warn('[Antigravity] No auth token found. Token configuration required.');
+      console.warn('[BrowserOperator] No auth token found. Token configuration required.');
       isConnected = false;
       authRequired = true;
       authError = 'Security token required. Please enter the token in the extension popup.';
@@ -132,7 +132,7 @@ async function connectBridge() {
     socket = currentWs;
 
     currentWs.onopen = () => {
-      console.log('[Antigravity] Connected to Local MCP Bridge at', WS_URL);
+      console.log('[BrowserOperator] Connected to Local MCP Bridge at', WS_URL);
     };
 
     currentWs.onmessage = async (event) => {
@@ -141,7 +141,7 @@ async function connectBridge() {
 
         // Handle authentication events
         if (message.action === 'auth_success') {
-          console.log('[Antigravity] Authenticated with Bridge');
+          console.log('[BrowserOperator] Authenticated with Bridge');
           isConnected = true;
           authRequired = false;
           authError = null;
@@ -155,7 +155,7 @@ async function connectBridge() {
         }
 
         if (message.action === 'auth_error') {
-          console.warn('[Antigravity] Authentication failed:', message.error);
+          console.warn('[BrowserOperator] Authentication failed:', message.error);
           isConnected = false;
           authRequired = true;
           authError = message.error;
@@ -172,7 +172,7 @@ async function connectBridge() {
         }
 
         const { id, action, params } = message;
-        console.log(`[Antigravity] Action: ${action} (ID: ${id})`, params);
+        console.log(`[BrowserOperator] Action: ${action} (ID: ${id})`, params);
 
         let result = null;
         let error = null;
@@ -180,7 +180,7 @@ async function connectBridge() {
         try {
           result = await handleAction(action, params);
         } catch (err) {
-          console.error(`[Antigravity] Error in ${action}:`, err);
+          console.error(`[BrowserOperator] Error in ${action}:`, err);
           error = err.message || String(err);
         }
 
@@ -188,7 +188,7 @@ async function connectBridge() {
           currentWs.send(JSON.stringify({ id, result, error }));
         }
       } catch (e) {
-        console.error('[Antigravity] Failed to process message:', e);
+        console.error('[BrowserOperator] Failed to process message:', e);
       }
     };
 
@@ -226,9 +226,9 @@ function scheduleReconnect() {
 }
 
 // Keep service worker alive and reconnect on any browser activity
-chrome.alarms.create('antigravity_keepalive', { periodInMinutes: 0.2 });
+chrome.alarms.create('browser_operator_keepalive', { periodInMinutes: 0.2 });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === 'antigravity_keepalive' && (!socket || socket.readyState !== WebSocket.OPEN)) {
+  if (alarm.name === 'browser_operator_keepalive' && (!socket || socket.readyState !== WebSocket.OPEN)) {
     connectBridge();
   }
 });
@@ -1047,11 +1047,19 @@ async function handleAction(action, params = {}) {
           if (params.pressEnter) {
             await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
               type: 'rawKeyDown',
-              windowsVirtualKeyCode: 13
+              key: 'Enter',
+              code: 'Enter',
+              text: '\r',
+              unmodifiedText: '\r',
+              windowsVirtualKeyCode: 13,
+              nativeVirtualKeyCode: 13
             });
             await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
               type: 'keyUp',
-              windowsVirtualKeyCode: 13
+              key: 'Enter',
+              code: 'Enter',
+              windowsVirtualKeyCode: 13,
+              nativeVirtualKeyCode: 13
             });
           }
 
