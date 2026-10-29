@@ -12,6 +12,9 @@ document.addEventListener('DOMContentLoaded', () => {
   const toggleTokenBtn = document.getElementById('toggleTokenBtn');
   const saveTokenBtn = document.getElementById('saveTokenBtn');
   const reloadExtBtn = document.getElementById('reloadExtBtn');
+  const copyCmdBox = document.getElementById('copyCmdBox');
+  const copyCmdBtn = document.getElementById('copyCmdBtn');
+  const tokenCmdText = document.getElementById('tokenCmdText');
 
   function updateStatus(state = {}) {
     const { isConnected = false, authRequired = false, authError = null, hasToken = !!tokenInput.value, profile = null } = state;
@@ -76,6 +79,19 @@ document.addEventListener('DOMContentLoaded', () => {
       toggleTokenBtn.innerText = '👁️';
     }
   });
+
+  // Copy PowerShell command handler
+  if (copyCmdBox && tokenCmdText) {
+    copyCmdBox.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(tokenCmdText.innerText.trim());
+        if (copyCmdBtn) copyCmdBtn.innerText = '✅';
+        setTimeout(() => {
+          if (copyCmdBtn) copyCmdBtn.innerText = '📋';
+        }, 1200);
+      } catch (e) {}
+    });
+  }
 
   // Save token handler: writes directly to storage and signals background
   saveTokenBtn.addEventListener('click', async () => {

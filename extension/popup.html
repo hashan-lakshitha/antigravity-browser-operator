@@ -53,9 +53,10 @@
         <input type="password" id="tokenInput" placeholder="Paste token here..." autocomplete="off" spellcheck="false">
         <button id="toggleTokenBtn" class="icon-btn" title="Show/Hide Token" type="button">👁️</button>
       </div>
-      <p class="token-hint" id="tokenHint">
-        From: <code>~/.browser-operator/token</code>
-      </p>
+      <div class="token-cmd-box" id="copyCmdBox" title="Click to copy PowerShell command">
+        <code id="tokenCmdText">Get-Content "$HOME\.browser-operator\token" | Set-Clipboard</code>
+        <button id="copyCmdBtn" class="copy-cmd-btn" type="button" title="Copy Command">📋</button>
+      </div>
       <div class="token-actions">
         <button id="saveTokenBtn" class="btn secondary">Save Token</button>
         <button id="reconnectBtn" class="btn primary">Reconnect</button>
